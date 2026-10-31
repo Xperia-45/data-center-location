@@ -27,6 +27,20 @@ ELEVATION_TIMEOUT_SEC = float(os.getenv("ELEVATION_TIMEOUT_SEC", "5.0"))
 ELEVATION_MEM_CACHE_MAX = int(os.getenv("ELEVATION_MEM_CACHE_MAX", "128"))
 RATE_LIMIT_COOLDOWN_SEC = float(os.getenv("ELEVATION_RATE_LIMIT_COOLDOWN_SEC", "30.0"))
 
+# How long a FAILED elevation result suppresses further upstream attempts for the same grid.
+# Open-Meteo's free tier is rate-limited per IP and Render's egress IP is shared, so a 429 is
+# not cured by retrying on the next page view -- retrying only feeds the limit that produced
+# it. Until this window elapses the caller keeps serving the flat reference plane. 0 disables
+# the backoff (the old behaviour: retry on every request).
+FAILURE_RETRY_DELAY_SEC = float(os.getenv("ELEVATION_FAILURE_RETRY_DELAY_SEC", "300.0"))
+
+# Failures that may succeed on a later attempt. Anything else (malformed or out-of-range
+# samples, an oversized batch, an explicit provider-side error) fails identically on a retry,
+# so it is never retried automatically: the flat plane stays until something upstream changes.
+RETRYABLE_FAILURE_REASONS = frozenset(
+    {"rate_limited", "timeout", "network_error", "http_error", "unexpected_error"}
+)
+
 COPERNICUS_DOI_URL = "https://doi.org/10.5270/ESA-c5d3d65"
 OPEN_METEO_DOCS_URL = "https://open-meteo.com/en/docs/elevation-api"
 ATTRIBUTION_TEXT = (
@@ -53,6 +67,53 @@ class ElevationFetchError(Exception):
         super().__init__(message or reason)
         self.reason = reason
         self.message = message or reason
+
+
+def _utc_now_iso() -> str:
+    """UTC timestamp in the same format the API stores elsewhere (`main.now()`)."""
+    return datetime.datetime.utcnow().isoformat() + "Z"
+
+
+def rate_limit_cooldown_remaining_sec() -> float | None:
+    """
+    Seconds left in the Open-Meteo cooldown, or None when the provider is not cooling down.
+
+    Published to clients as `retry_after_sec` so a caller can wait out the limit instead of
+    retrying blindly into it.
+    """
+    remaining = _rate_limited_until - time.monotonic()
+    return round(remaining, 1) if remaining > 0 else None
+
+
+def failed_elevation_retry_is_due(existing: object) -> bool:
+    """
+    Should a stored non-"ok" elevation payload be re-fetched right now?
+
+    * Not a dict (no elevation stored yet) -> yes.
+    * A non-retryable reason -> never automatically; the flat plane stays.
+    * A retryable reason -> at most once per FAILURE_RETRY_DELAY_SEC, measured from
+      `observed_at`.
+    * A retryable failure stored before `observed_at` existed -> yes, once. That first retry
+      records a timestamp, so the backoff applies from then on; no migration needed.
+    """
+    if not isinstance(existing, dict):
+        return True
+    if FAILURE_RETRY_DELAY_SEC <= 0:
+        return True
+    reason = existing.get("reason") or "unavailable"
+    if reason not in RETRYABLE_FAILURE_REASONS:
+        return False
+    observed = existing.get("observed_at")
+    if not isinstance(observed, str) or not observed:
+        return True
+    try:
+        observed_at = datetime.datetime.fromisoformat(observed.replace("Z", "+00:00"))
+    except ValueError:
+        return True
+    if observed_at.tzinfo is None:
+        observed_at = observed_at.replace(tzinfo=datetime.timezone.utc)
+    age_sec = (datetime.datetime.now(datetime.timezone.utc) - observed_at).total_seconds()
+    return age_sec >= FAILURE_RETRY_DELAY_SEC
 
 
 def clear_elevation_memory_cache() -> None:
@@ -176,6 +237,7 @@ def unavailable_elevation_payload(
     detail: str = "",
     lat: float | None = None,
     lon: float | None = None,
+    retry_after_sec: float | None = None,
 ) -> dict:
     n = normalize_grid_size(grid_size)
     r_km = sanitize_radius_km(radius_km)
@@ -184,6 +246,13 @@ def unavailable_elevation_payload(
         "status": "unavailable",
         "reason": reason,
         "detail": detail or "Real DEM elevation unavailable; displaying flat unmeasured reference plane.",
+        # Retry metadata: lets a caller tell "rate limited, come back in N seconds" apart from
+        # a hard failure, and lets the backend age a stored failure before retrying it.
+        "retryable": reason in RETRYABLE_FAILURE_REASONS,
+        "retry_after_sec": (
+            round(float(retry_after_sec), 1) if retry_after_sec is not None else None
+        ),
+        "observed_at": _utc_now_iso(),
         "lat": round(float(lat), 5) if lat is not None else None,
         "lon": round(float(lon), 5) if lon is not None else None,
         "radius_km": round(r_km, 3),
@@ -363,7 +432,13 @@ async def get_elevation_grid(
                 flat = await fetch_open_meteo_batches(batches)
             except ElevationFetchError as exc:
                 return unavailable_elevation_payload(
-                    r_km, n, reason=exc.reason, detail=exc.message, lat=lat, lon=lon
+                    r_km,
+                    n,
+                    reason=exc.reason,
+                    detail=exc.message,
+                    lat=lat,
+                    lon=lon,
+                    retry_after_sec=rate_limit_cooldown_remaining_sec(),
                 )
             except Exception as exc:
                 return unavailable_elevation_payload(

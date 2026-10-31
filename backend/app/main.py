@@ -4,7 +4,11 @@ from fastapi import FastAPI, HTTPException, Query, Response
 from fastapi.middleware.cors import CORSMiddleware
 from .db import init_db, conn, get_storage_persistence_info
 from .schemas import SiteIn, ScenarioIn, LegalSearch, ParcelValidateIn, LandscapeRequest
-from .services.elevation import DEFAULT_ELEVATION_GRID_SIZE, get_elevation_grid
+from .services.elevation import (
+    DEFAULT_ELEVATION_GRID_SIZE,
+    failed_elevation_retry_is_due,
+    get_elevation_grid,
+)
 from .services.environment import analyze, sort_features_by_distance
 from .services.legal import evaluate
 from .services.scenarios import simulate, PRESETS
@@ -101,16 +105,31 @@ async def env(
             payload["features"] = sort_features_by_distance(payload["features"])
         existing_elev = payload.get("elevation")
         desired_grid = grid_size if grid_size is not None else (existing_elev.get("grid_size") if isinstance(existing_elev, dict) else None)
-        if (
-            not isinstance(existing_elev, dict)
-            or existing_elev.get("status") != "ok"
-            or (grid_size is not None and existing_elev.get("grid_size") != grid_size)
-        ):
+        # A failed grid used to be re-fetched on EVERY call, because the stored payload only
+        # ever became "ok". One upstream 429 then turned every page view into a fresh request
+        # against a per-IP rate limit. Retry policy now lives in the elevation service:
+        # transient failures are retried at most once per ELEVATION_FAILURE_RETRY_DELAY_SEC,
+        # non-retryable ones not at all. An explicit grid_size still forces a fetch, because
+        # that is a different resolution.
+        needs_grid = not isinstance(existing_elev, dict)
+        grid_mismatch = (
+            isinstance(existing_elev, dict)
+            and grid_size is not None
+            and existing_elev.get("grid_size") != grid_size
+        )
+        retry_due = (
+            isinstance(existing_elev, dict)
+            and existing_elev.get("status") != "ok"
+            and failed_elevation_retry_is_due(existing_elev)
+        )
+        if needs_grid or grid_mismatch or retry_due:
             refreshed = await get_elevation_grid(
                 site["lat"], site["lon"], site["radius_km"], grid_size=desired_grid
             )
             payload["elevation"] = refreshed
-            if refreshed.get("status") == "ok" and grid_size is None:
+            if grid_size is None:
+                # Failures are persisted too: `observed_at` is what makes the retry window
+                # measurable across requests and container restarts.
                 c2 = conn()
                 c2.execute("UPDATE analyses SET payload=? WHERE id=?", (json.dumps(payload), aid))
                 c2.commit()
