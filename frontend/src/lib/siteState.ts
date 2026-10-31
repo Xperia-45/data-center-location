@@ -166,6 +166,27 @@ export function failSiteLoad(
   };
 }
 
+/**
+ * Returns the landscape base layer ONLY when the payload belongs to the site being drawn.
+ *
+ * The Stage 3A request is asynchronous, so while a new site's landscape is in flight the state
+ * still holds the previous site's payload. Drawing it would project another location's rivers,
+ * roads and water onto the current site's coordinates - the same class of bug that
+ * `resolveTimescapeFeatures` and `resolveTimescapeElevation` already guard against in 3D.
+ * Returns null (nothing is drawn, and the sheet reports the layers as unavailable) otherwise.
+ */
+export function resolveLandscapeBaseLayer(params: {
+  payload: any;
+  /** Site key the payload was fetched for. */
+  payloadSiteKey: string;
+  /** Site key currently being drawn. */
+  siteKey: string;
+}): any | null {
+  const { payload, payloadSiteKey, siteKey } = params;
+  if (!siteKey || !payloadSiteKey || payloadSiteKey !== siteKey) return null;
+  return payload?.base_layer ?? null;
+}
+
 export function isTimescapeReady(state: ActiveSiteWorkspaceState): boolean {
   return (
     !state.loadingAnalysis &&

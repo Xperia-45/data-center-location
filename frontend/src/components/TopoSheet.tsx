@@ -41,6 +41,20 @@ export interface TopoSheetProps {
 
 const EMPTY: CartoCollection = { type: 'FeatureCollection', features: [] };
 
+/** Area classes in paint order (first = bottom), with their SoI-inspired fill and outline. */
+const AREA_STYLES: [string, string, string, number][] = [
+  ['farmland', TOPO_PALETTE.farmland, TOPO_PALETTE.farmland, 0.75],
+  ['vegetation', TOPO_PALETTE.vegetation, TOPO_PALETTE.vegetationEdge, 0.8],
+  ['settlement', TOPO_PALETTE.settlement, TOPO_PALETTE.settlementEdge, 0.85],
+  ['protected', TOPO_PALETTE.protected, '#9c8a5f', 0.6],
+  ['water_area', TOPO_PALETTE.water, TOPO_PALETTE.waterEdge, 0.9],
+  ['wetland', TOPO_PALETTE.wetland, TOPO_PALETTE.waterEdge, 0.8],
+];
+
+const SOURCE_IDS = [
+  'tint', ...AREA_STYLES.map(([id]) => id), 'road', 'waterway', 'contours', 'site-radius', 'footprint',
+];
+
 /** Map bounds covering the analysis circle with a little paper around the edge. */
 function boundsFor(lat: number, lon: number, radiusKm: number): [[number, number], [number, number]] {
   const cosLat = Math.max(1e-6, Math.cos((lat * Math.PI) / 180));
@@ -138,9 +152,14 @@ export default function TopoSheet({
       else map.addSource(id, { type: 'geojson', data: data as any });
     };
 
-    const paint = () => {
+    // Sources and styles are created ONCE; the data is refreshed on EVERY change. The previous
+    // single guarded `paint()` early-returned as soon as the layers existed, so a second site's
+    // geography never reached the map and the sheet kept drawing the first site's features.
+    const ensureLayers = () => {
       if (map.getLayer('tint')) return;
-      upsert('tint', tint.available ? tint.collection : EMPTY);
+      for (const id of SOURCE_IDS) {
+        if (!map.getSource(id)) map.addSource(id, { type: 'geojson', data: EMPTY as any });
+      }
       map.addLayer({
         id: 'tint', type: 'fill', source: 'tint',
         paint: {
@@ -151,25 +170,13 @@ export default function TopoSheet({
           'fill-opacity': 0.55,
         },
       });
-
-      const fills: [string, string, string | any, number][] = [
-        ['farmland', TOPO_PALETTE.farmland, TOPO_PALETTE.farmland, 0.75],
-        ['vegetation', TOPO_PALETTE.vegetation, TOPO_PALETTE.vegetationEdge, 0.8],
-        ['settlement', TOPO_PALETTE.settlement, TOPO_PALETTE.settlementEdge, 0.85],
-        ['protected', TOPO_PALETTE.protected, '#9c8a5f', 0.6],
-        ['water_area', TOPO_PALETTE.water, TOPO_PALETTE.waterEdge, 0.9],
-        ['wetland', TOPO_PALETTE.wetland, TOPO_PALETTE.waterEdge, 0.8],
-      ];
-      for (const [id, color, outline, opacity] of fills) {
-        upsert(id, cartography.layers[id as keyof typeof cartography.layers].collection);
+      for (const [id, color, outline, opacity] of AREA_STYLES) {
         map.addLayer({ id, type: 'fill', source: id, paint: { 'fill-color': color, 'fill-opacity': opacity } });
         map.addLayer({
           id: `${id}-outline`, type: 'line', source: id,
           paint: { 'line-color': outline, 'line-width': 0.6, 'line-opacity': 0.7 },
         });
       }
-
-      upsert('road', cartography.layers.road.collection);
       map.addLayer({
         id: 'road', type: 'line', source: 'road',
         paint: {
@@ -178,8 +185,6 @@ export default function TopoSheet({
           'line-opacity': 0.85,
         },
       });
-
-      upsert('waterway', cartography.layers.waterway.collection);
       map.addLayer({
         id: 'waterway', type: 'line', source: 'waterway',
         paint: {
@@ -189,8 +194,6 @@ export default function TopoSheet({
           'line-dasharray': ['case', ['get', 'intermittent'], ['literal', [3, 2]], ['literal', [1]]],
         },
       });
-
-      upsert('contours', contours.collection);
       map.addLayer({
         id: 'contours', type: 'line', source: 'contours',
         paint: {
@@ -199,14 +202,10 @@ export default function TopoSheet({
           'line-opacity': 0.85,
         },
       });
-
-      upsert('site-radius', siteCircle);
       map.addLayer({
         id: 'site-radius', type: 'line', source: 'site-radius',
         paint: { 'line-color': '#2f6f4f', 'line-width': 1.4, 'line-dasharray': [4, 3] },
       });
-
-      upsert('footprint', footprint.collection);
       map.addLayer({
         id: 'footprint-fill', type: 'fill', source: 'footprint',
         paint: { 'fill-color': '#7c3aed', 'fill-opacity': 0.22 },
@@ -217,8 +216,21 @@ export default function TopoSheet({
       });
     };
 
-    if (map.loaded()) paint();
-    else map.once('load', paint);
+    const refreshData = () => {
+      upsert('tint', tint.available ? tint.collection : EMPTY);
+      for (const [id] of AREA_STYLES) {
+        upsert(id, cartography.layers[id as keyof typeof cartography.layers].collection);
+      }
+      upsert('road', cartography.layers.road.collection);
+      upsert('waterway', cartography.layers.waterway.collection);
+      upsert('contours', contours.collection);
+      upsert('site-radius', siteCircle);
+      upsert('footprint', footprint.collection);
+    };
+
+    const run = () => { ensureLayers(); refreshData(); };
+    if (map.loaded()) run();
+    else map.once('load', run);
   }, [cartography, contours, tint, siteCircle, footprint]);
 
   // ------------------------------------------------------------------ labels

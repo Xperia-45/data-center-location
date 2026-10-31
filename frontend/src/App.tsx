@@ -23,6 +23,7 @@ import {
   getValidatedFeaturesForSite,
   isTimescapeReady,
   onFormCoordinatesChanged,
+  resolveLandscapeBaseLayer,
 } from './lib/siteState';
 import {
   MapPin,
@@ -102,6 +103,9 @@ export default function App() {
   // only when the Timescape is opened: the base layer is scenario-independent, so switching
   // Present / Development / Future must never re-request it.
   const [landscape, setLandscape] = useState<any>(null);
+  // Which site the loaded payload belongs to. Without this the previous site's geography is
+  // drawn against the new site's coordinates while the next request is in flight.
+  const [landscapeFor, setLandscapeFor] = useState('');
   const [landscapeBusy, setLandscapeBusy] = useState(false);
   const [landscapeErr, setLandscapeErr] = useState('');
   const [sheetMode, setSheetMode] = useState<'2d' | '3d'>('2d');
@@ -237,7 +241,11 @@ export default function App() {
         water_mld: site.water_mld,
         power_mw: site.power_mw,
       })
-      .then((payload) => { if (!cancelled) setLandscape(payload); })
+      .then((payload) => {
+        if (cancelled) return;
+        setLandscape(payload);
+        setLandscapeFor(landscapeSiteKey);
+      })
       .catch((e: any) => {
         if (cancelled) return;
         setLandscape(null);
@@ -248,7 +256,13 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [view, landscapeSiteKey, landscapeGridSize]);
 
-  const baseLayer = landscape?.base_layer ?? null;
+  // Only the payload belonging to the CURRENT site may be drawn - the same guard the 3D scene
+  // applies to features and elevation.
+  const baseLayer = resolveLandscapeBaseLayer({
+    payload: landscape,
+    payloadSiteKey: landscapeFor,
+    siteKey: landscapeSiteKey,
+  });
 
   /** Single elevation source shared by the 2D sheet and the 3D terrain, so they cannot disagree. */
   const sheetTerrain = useMemo(() => {

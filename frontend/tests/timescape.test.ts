@@ -37,6 +37,7 @@ import {
   getValidatedFeaturesForSite,
   isTimescapeReady,
   onFormCoordinatesChanged,
+  resolveLandscapeBaseLayer,
 } from '../src/lib/siteState.ts';
 
 test('Ludhiana and Mohali presets have distinct, realistic coordinates', () => {
@@ -575,4 +576,23 @@ test('Integration: Timescape component renders AMSL metadata, attribution, fallb
   assert.ok(fallbackHtml.includes('FALLBACK REFERENCE PLANE (Elevation UNAVAILABLE)'));
   assert.ok(fallbackHtml.includes('timeout'));
   assert.ok(fallbackHtml.includes('not measured terrain'));
+});
+
+test('a landscape payload is only drawn for the site it was fetched for', () => {
+  const payload = { base_layer: { osm: { status: 'ok', features: [{ id: 'way/1' }] } } };
+  // Correct site: the base layer is used.
+  assert.equal(
+    resolveLandscapeBaseLayer({ payload, payloadSiteKey: 'site-1:5', siteKey: 'site-1:5' }),
+    payload.base_layer
+  );
+  // Another site, or a changed radius: nothing is drawn rather than the wrong geography.
+  assert.equal(resolveLandscapeBaseLayer({ payload, payloadSiteKey: 'site-1:5', siteKey: 'site-2:5' }), null);
+  assert.equal(resolveLandscapeBaseLayer({ payload, payloadSiteKey: 'site-1:5', siteKey: 'site-1:10' }), null);
+  // In-flight / not-yet-fetched states must not draw either.
+  assert.equal(resolveLandscapeBaseLayer({ payload, payloadSiteKey: '', siteKey: 'site-1:5' }), null);
+  assert.equal(resolveLandscapeBaseLayer({ payload: null, payloadSiteKey: '', siteKey: '' }), null);
+  assert.equal(
+    resolveLandscapeBaseLayer({ payload: { no_base_layer: true }, payloadSiteKey: 's:5', siteKey: 's:5' }),
+    null
+  );
 });
