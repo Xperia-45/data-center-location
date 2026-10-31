@@ -100,13 +100,52 @@ Environment (Protection) Act 1986 (ss.5, 15-as-amended) · Water Act 1974 (s.25/
 - **Optional parcel:** `POST /api/v1/parcel/validate` (Shapely) and `POST /api/v1/landscape` with `parcel_geojson`. A rejected parcel is reported and never used as a land-cover mask.
 - **Parcel containment is a polygon test, not a vertex test:** `within_site_radius` is Shapely `covers()` of the projected parcel against a `PARCEL_CIRCLE_QUAD_SEGS`-based circular buffer (256-segment by default) in the local ENU plane, so a parcel is only "inside" when its whole area is. `all_vertices_within_site_radius` is published separately and, on its own, does **not** prove containment; `max_vertex_distance_km` (planar) and `max_geodesic_vertex_distance_km` are both reported because the ENU plane is an approximation. `containment_method` / `containment_note` state exactly this in the payload.
 - **Shapely repair never accepts a non-polygon:** `make_valid()` output is type-checked; polygonal components of a `GeometryCollection` are extracted (unioned) and zero-area leftovers (`LineString`, `Point`) are discarded and listed in `discarded_non_polygonal_components`. If repair leaves no polygonal area the parcel is **rejected** with HTTP 422. The response publishes the `geometry` actually used downstream — land-cover masking always uses the repaired geometry, never the raw input ring.
-- Environment knobs: `OVERPASS_URL`, `OVERPASS_TIMEOUT_SEC`, `OVERPASS_MAX_ELEMENTS`, `OVERPASS_MAX_GEOMETRY_POINTS`, `WORLDCOVER_ENABLED`, `WORLDCOVER_URL_PREFIX`, `WORLDCOVER_MAX_WINDOW_PIXELS`, `WORLDCOVER_MAX_SAMPLED_PIXELS`, `WORLDCOVER_TIMEOUT_SEC`, `MAX_PARCEL_VERTICES`, `SCENARIO_MULTIPLIERS_PATH`, `SCENARIO_MULTIPLIER_OVERRIDES`, `PARCEL_CIRCLE_QUAD_SEGS`, `ELEVATION_GRID_SIZE`, `ELEVATION_FAILURE_RETRY_DELAY_SEC`.
+- **Overpass mirror failover:** a layer request is tried against an ordered list of endpoints (`overpass_endpoints()`) and only reported `unavailable` when every one fails. Precedence is `OVERPASS_MIRRORS` (comma or whitespace separated) > the legacy single-endpoint `OVERPASS_URL` > the built-in public mirror list (`overpass-api.de`, `overpass.kumi.systems`, `overpass.private.coffee`). Failover happens on transport errors, timeouts, non-JSON 200 bodies and retryable statuses (404/408/429/5xx); it does **not** happen on 400/401/403/405/413/422, because every mirror runs the same Overpass QL and would reject our request identically. Attempts are bounded by `OVERPASS_MIRROR_ATTEMPTS` per endpoint (default 1). Every layer payload publishes `endpoint_used` and `endpoints_attempted` (per-endpoint status and error), and an all-mirrors failure keeps the real reason plus each endpoint's error in `detail` — a failure is never reported as a successful empty result, and is never cached.
+- Environment knobs: `OVERPASS_URL`, `OVERPASS_MIRRORS`, `OVERPASS_MIRROR_ATTEMPTS`, `OVERPASS_TIMEOUT_SEC`, `OVERPASS_MAX_ELEMENTS`, `OVERPASS_MAX_GEOMETRY_POINTS`, `WORLDCOVER_ENABLED`, `WORLDCOVER_URL_PREFIX`, `WORLDCOVER_MAX_WINDOW_PIXELS`, `WORLDCOVER_MAX_SAMPLED_PIXELS`, `WORLDCOVER_TIMEOUT_SEC`, `MAX_PARCEL_VERTICES`, `SCENARIO_MULTIPLIERS_PATH`, `SCENARIO_MULTIPLIER_OVERRIDES`, `PARCEL_CIRCLE_QUAD_SEGS`, `ELEVATION_GRID_SIZE`, `ELEVATION_FAILURE_RETRY_DELAY_SEC`.
 
-The frontend is unchanged in Stage 3A — the landscape endpoints are additive.
+The Stage 3A endpoints are additive; the frontend consumes them in the Environmental Timescape (below).
+
+## Environmental Timescape — topographic sheet (frontend)
+
+The Timescape renders the site's **actual mapped geography** as a Survey-of-India-inspired
+cartographic sheet, with a 2D map and a 3D terrain view built from the same projected features.
+
+- **One data path.** The frontend calls `GET /api/v1/landscape?...&include_geometry=true` once per
+  site + radius, and only when the Timescape tab is opened. `grid_size` is passed through from the
+  elevation the site analysis already loaded, so the terrain layer resolves from the **same
+  `dem:v2` cache key** instead of triggering a second upstream DEM fetch. The base layer is
+  scenario-independent (`base_layer.temporal_invariance`), so switching Present / Development /
+  Future never re-requests it.
+- **Cartography (`src/lib/cartography.ts`).** Pure, unit-tested conversion of the mapped layer into
+  GeoJSON per class. Classification keys off `osm_tags`, not the backend's `layer`/`kind`, because
+  one element legitimately arrives from several layer queries with a different `kind` each time;
+  features are deduped by OSM id with hydrology winning over land use. Closed rings arrive as
+  `LineString`s and are promoted to polygons.
+- **Contours** are marching-squares isolines over the returned DEM samples, with the interval chosen
+  as the finest that still yields at most ~8 contours (5 m on alluvial plains, 10-20 m on rising
+  ground, 50-500 m in mountains). The legend publishes the interval **and the sample spacing**,
+  because interpolating between samples draws a smooth line but does not add native resolution.
+- **Elevation tinting** is one quad per DEM sample cell (a choropleth of the samples), not a
+  smoothly interpolated raster, so the sheet cannot imply detail the grid does not have.
+- **3D (`src/lib/sceneGeography.ts`)** drapes the same features with the same `projectLatLonToScene`
+  projection, so the two views can never disagree. Feature line widths are cartographic, not to
+  scale, and the UI says so.
+- **No remote tile or glyph server.** The MapLibre style is a local object, every source is our own
+  GeoJSON, and place names are HTML labels — the sheet renders offline, in a preview iframe, and on
+  Render, and can never show a road or a coastline our datasets did not supply.
+- **Unavailable layers stay unavailable.** A layer the backend reports as `unavailable` yields an
+  empty collection and a legend entry with its real reason; nothing is synthesised. With no DEM the
+  sheet loses only its contours and tinting and says so explicitly, the mapped geography keeps
+  rendering, and the 3D terrain is an explicitly labelled flat reference plane carrying a 1 km
+  reference graticule — never fake hills and never zeros.
+- **Temporal invariance** is pinned by tests: the base sheet fingerprint is identical across
+  Present / Development / Future for every preset, while the modelled footprint envelope (labelled
+  `modelled`, "not a surveyed boundary") is the only thing that changes.
 
 ## Known limitations & Render persistence note
 - **Render ephemeral SQLite storage:** Without a mounted Render Persistent Disk, container-local `/srv/platform.db` resets on redeploy or idle spin-down (`GET /api/v1/health` reports `storage.mode = "ephemeral_default"`). To keep Open-Meteo usage controlled without relying solely on container disk: (1) backend uses a bounded in-memory LRU cache + single-flight request deduplication + best-effort SQLite `elevation_cache`, (2) `GET /api/v1/elevation` sets `Cache-Control: public, max-age=604800`, and (3) the frontend persists verified DEM grids in a bounded `localStorage` cache (`terralex:elevation_cache:v2`). For server-side persistence across restarts on Render, mount a Persistent Disk and set `DATABASE_URL_SQLITE=/var/data/platform.db`, or migrate to PostgreSQL/PostGIS (`docker-compose.yml`).
 - **Open-Meteo usage terms:** Free API (`https://api.open-meteo.com/v1/elevation`) is strictly for **non-commercial use** (`<10,000` calls/day, `<5,000`/hr, `<600`/min, CC BY 4.0) with mandatory Open-Meteo + Copernicus DEM (`DOI: 10.5270/ESA-c5d3d65`) attribution; configure `OPEN_METEO_ELEVATION_URL` + `OPEN_METEO_API_KEY` for commercial plans or self-hosted Open-Meteo.
+- **Overpass is a shared public service:** the primary instance has been observed refusing all connections from Render's egress IP (live, 2026-10-31: all 8 layer queries failed with `All connection attempts failed`). Mirror failover removes the single-point-of-failure but does not make public Overpass a guarantee; for a production deployment, run a private Overpass instance and point `OVERPASS_URL` at it.
 - **DEM failure retry policy (rate-limit protection):** a *failed* elevation grid used to be re-fetched on every `GET /api/v1/sites/{id}/environment` call, because the stored analysis payload only ever became `"ok"` — so a single Open-Meteo 429 turned every page view into a fresh request against a per-IP free-tier limit, feeding the very limit that produced it. Failures are now persisted with an `observed_at` timestamp and retried at most once per `ELEVATION_FAILURE_RETRY_DELAY_SEC` (default 300 s; `0` disables the backoff). Only transient reasons are retried automatically (`rate_limited`, `timeout`, `network_error`, `http_error`, `unexpected_error`); data-integrity reasons (`malformed_response`, `missing_values`, `batch_size_exceeded`, `api_error`) are not, because a retry cannot heal them. An unavailable payload publishes `retryable` and `retry_after_sec` (the remaining Open-Meteo cooldown) so a caller can wait instead of hammering. The flat reference plane, `data_class: "unavailable"`, null values and the DSM disclaimer on success are all unchanged — nothing is fabricated and nothing is silently zeroed. Pinned by `backend/tests/test_dem_retry_policy.py`.
 - **Optional geospatial dependencies:** `shapely` and `rasterio` are optional at runtime. Without `rasterio` the land-cover layer returns `reason: "rasterio_unavailable"`; without `shapely` parcel validation returns HTTP 503 and geometry distances fall back to a labelled `vertex_min_distance`. `rasterio` bundles GDAL and adds roughly 60-90 MB to the image.
 - **WorldCover read budget:** tiles are ~100 MB COGs, so only a byte window is fetched. AOIs above `WORLDCOVER_MAX_WINDOW_PIXELS` (default 16 M pixels) are reported `aoi_exceeds_landcover_budget` instead of being downsampled, and windows above `WORLDCOVER_MAX_SAMPLED_PIXELS` (default 2 M) are systematically subsampled with the stride published in the payload.

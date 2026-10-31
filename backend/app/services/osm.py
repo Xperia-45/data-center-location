@@ -19,6 +19,7 @@ import asyncio
 import datetime
 import math
 import os
+import re
 from typing import Any
 
 import httpx
@@ -26,8 +27,52 @@ import httpx
 from .cache import NamespacedCache
 from .geo import decimate, enu_km, haversine_km
 
-OVERPASS_URL = os.getenv("OVERPASS_URL", "https://overpass-api.de/api/interpreter")
+# Public Overpass instances, tried in order. The primary instance has repeatedly refused
+# connections from Render's egress IP (observed live on 2026-10-31: all 8 layer queries failed
+# with "All connection attempts failed"), so a single endpoint is not a reliable dependency for
+# a deployed service. Failover between public mirrors needs no new infrastructure and no paid
+# service; every mirror returns the same OSM data under the same ODbL licence.
+DEFAULT_OVERPASS_MIRRORS: tuple[str, ...] = (
+    "https://overpass-api.de/api/interpreter",
+    "https://overpass.kumi.systems/api/interpreter",
+    "https://overpass.private.coffee/api/interpreter",
+)
+
+# Legacy single-endpoint knob. Still honoured: a deployment that pinned its own mirror keeps
+# using exactly that endpoint and is not silently sent to third parties.
+OVERPASS_URL = os.getenv("OVERPASS_URL", DEFAULT_OVERPASS_MIRRORS[0])
 OVERPASS_TIMEOUT_SEC = float(os.getenv("OVERPASS_TIMEOUT_SEC", "15"))
+# Attempts per endpoint. Failover across mirrors IS the retry strategy, so the default is one
+# attempt each; the total attempt budget is len(endpoints) * this value.
+OVERPASS_MIRROR_ATTEMPTS = max(1, int(os.getenv("OVERPASS_MIRROR_ATTEMPTS", "1")))
+
+# Client-side conditions that another instance may well survive.
+RETRYABLE_HTTP_STATUS = frozenset({408, 429, 500, 502, 503, 504, 404})
+# Conditions that are about OUR request, not the instance: every mirror runs the same Overpass
+# QL, so retrying elsewhere cannot help and would only multiply the load.
+NON_RETRYABLE_HTTP_STATUS = frozenset({400, 401, 403, 405, 413, 422})
+
+
+def overpass_endpoints() -> list[str]:
+    """
+    Ordered Overpass endpoints to try.
+
+    Precedence: `OVERPASS_MIRRORS` (comma or whitespace separated) > legacy `OVERPASS_URL` >
+    the built-in public mirror list. Duplicates are dropped, order preserved. Read at call
+    time so a deployment can be reconfigured without a code change.
+    """
+    mirrors_env = os.getenv("OVERPASS_MIRRORS", "").strip()
+    if mirrors_env:
+        raw = [m.strip() for m in re.split(r"[,\s]+", mirrors_env)]
+    elif os.getenv("OVERPASS_URL", "").strip():
+        raw = [os.getenv("OVERPASS_URL", "").strip()]
+    else:
+        raw = list(DEFAULT_OVERPASS_MIRRORS)
+    ordered: list[str] = []
+    for url in raw:
+        if url and url not in ordered:
+            ordered.append(url)
+    return ordered or [DEFAULT_OVERPASS_MIRRORS[0]]
 OVERPASS_QUERY_TIMEOUT_SEC = int(os.getenv("OVERPASS_QUERY_TIMEOUT", "12"))
 MAX_ELEMENTS_PER_LAYER = int(os.getenv("OVERPASS_MAX_ELEMENTS", "250"))
 MAX_GEOMETRY_POINTS = int(os.getenv("OVERPASS_MAX_GEOMETRY_POINTS", "200"))
@@ -332,35 +377,69 @@ async def fetch_layer(
         "cacheable": False,
     }
     owns_client = client is None
+    endpoints = overpass_endpoints()
+    attempts: list[dict[str, Any]] = []
+    # (reason, detail) of the most recent attempt: this is what the layer reports when every
+    # endpoint failed, so the existing reason vocabulary is preserved for callers that branch on it.
+    last_failure: list[tuple[str, str]] = [("network_error", "Overpass unreachable")]
+
+    async def _attempt(cl: httpx.AsyncClient, url: str):
+        """One request to one endpoint: (succeeded, body, reason, detail, try_next_endpoint)."""
+        host = url.split("//")[-1].split("/")[0]
+        try:
+            resp = await cl.post(url, data={"data": query})
+        except httpx.TimeoutException:
+            return False, None, "timeout", f"{host} timed out after {OVERPASS_TIMEOUT_SEC}s", True
+        except httpx.HTTPError as exc:
+            return False, None, "network_error", f"{host} transport error: {exc}", True
+        if resp.status_code == 429:
+            return False, None, "rate_limited", f"{host} returned HTTP 429 (rate limited)", True
+        if resp.status_code == 504:
+            return False, None, "gateway_timeout", f"{host} gateway timeout (HTTP 504)", True
+        if resp.status_code in NON_RETRYABLE_HTTP_STATUS:
+            # Our request is what the instance rejected; another mirror runs the same Overpass QL
+            # and would reject it identically, so stop instead of multiplying the load.
+            return False, None, "http_error", f"{host} returned HTTP {resp.status_code}", False
+        if resp.status_code != 200:
+            return False, None, "http_error", f"{host} returned HTTP {resp.status_code}", True
+        try:
+            payload = resp.json()
+        except ValueError:
+            # Several mirror front-ends answer 200 with an HTML error page rather than a 5xx.
+            return False, None, "malformed_response", f"{host} returned a non-JSON body", True
+        return True, payload, "", "", False
+
+    async def _run(cl: httpx.AsyncClient):
+        for url in endpoints:
+            for _ in range(OVERPASS_MIRROR_ATTEMPTS):
+                ok, payload, reason, detail, try_next = await _attempt(cl, url)
+                attempts.append({"endpoint": url, "status": "ok" if ok else reason, "detail": detail})
+                if ok:
+                    return payload, url
+                last_failure[0] = (reason, detail)
+                if not try_next:
+                    return None, None
+        return None, None
+
     try:
         if owns_client:
-            async with httpx.AsyncClient(timeout=OVERPASS_TIMEOUT_SEC, headers={"User-Agent": USER_AGENT}) as cl:
-                resp = await cl.post(OVERPASS_URL, data={"data": query})
+            async with httpx.AsyncClient(
+                timeout=OVERPASS_TIMEOUT_SEC, headers={"User-Agent": USER_AGENT}
+            ) as cl:
+                body, used_endpoint = await _run(cl)
         else:
-            resp = await client.post(OVERPASS_URL, data={"data": query})  # type: ignore[union-attr]
-
-        if resp.status_code == 429:
-            return {**base, "status": "unavailable", "reason": "rate_limited",
-                    "detail": "Overpass returned HTTP 429 (rate limited). No features are inferred from a failed query."}
-        if resp.status_code == 504:
-            return {**base, "status": "unavailable", "reason": "gateway_timeout",
-                    "detail": "Overpass gateway timeout (HTTP 504). No features are inferred from a failed query."}
-        if resp.status_code != 200:
-            return {**base, "status": "unavailable", "reason": "http_error",
-                    "detail": f"Overpass returned HTTP {resp.status_code}."}
-        try:
-            body = resp.json()
-        except ValueError:
-            return {**base, "status": "unavailable", "reason": "malformed_response",
-                    "detail": "Overpass returned a non-JSON body."}
-    except httpx.TimeoutException:
-        return {**base, "status": "unavailable", "reason": "timeout",
-                "detail": f"Overpass timed out after {OVERPASS_TIMEOUT_SEC}s."}
-    except httpx.HTTPError as exc:
-        return {**base, "status": "unavailable", "reason": "network_error",
-                "detail": f"Overpass transport error: {exc}"}
+            body, used_endpoint = await _run(client)  # type: ignore[arg-type]
     except Exception as exc:  # pragma: no cover - defensive
-        return {**base, "status": "unavailable", "reason": "unexpected_error", "detail": str(exc)}
+        return {**base, "status": "unavailable", "reason": "unexpected_error", "detail": str(exc),
+                "endpoints_attempted": attempts}
+
+    if body is None:
+        reason, _ = last_failure[0]
+        detail = "Every Overpass endpoint failed - " + "; ".join(
+            f"{a['endpoint']} ({a['detail']})" for a in attempts
+        ) + ". No features are inferred from a failed query."
+        return {**base, "status": "unavailable", "reason": reason, "detail": detail,
+                "endpoints_attempted": attempts}
 
     elements = body.get("elements", []) if isinstance(body, dict) else []
     features = [f for f in (_parse_element(el, layer_id, lat, lon, include_geometry) for el in elements) if f]
@@ -370,6 +449,8 @@ async def fetch_layer(
         **base,
         "status": "ok",
         "cacheable": True,
+        "endpoint_used": used_endpoint,
+        "endpoints_attempted": attempts,
         "reason": None,
         "detail": (
             f"{len(features)} mapped feature(s) returned"
