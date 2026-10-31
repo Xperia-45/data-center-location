@@ -185,6 +185,8 @@ def unavailable_elevation_payload(
         "center_m": None,
         "relief_m": None,
         "resolution_m": None,
+        "data_class": "unavailable",
+        "surface_model": None,
         "source": "Unavailable (Open-Meteo / Copernicus DEM GLO-90 not loaded)",
         "source_url": OPEN_METEO_DOCS_URL,
         "copernicus_doi_url": COPERNICUS_DOI_URL,
@@ -371,13 +373,21 @@ async def get_elevation_grid(
                 "center_m": center_m,
                 "relief_m": relief_m,
                 "resolution_m": 90,
+                "data_class": "observation_derived",
+                "surface_model": (
+                    "Digital Surface Model (DSM): elevations include buildings, structures and "
+                    "vegetation canopy. This is NOT bare-earth terrain (DTM)."
+                ),
                 "source": "Copernicus DEM GLO-90 (90m) via Open-Meteo Elevation API",
                 "source_url": OPEN_METEO_DOCS_URL,
                 "copernicus_doi_url": COPERNICUS_DOI_URL,
                 "license": "CC BY 4.0 (Open-Meteo non-commercial) / Copernicus DEM open licence",
                 "attribution": ATTRIBUTION_TEXT,
                 "cache_hit": None,
-                "data_label": f"Measured DEM terrain (Copernicus GLO-90 ~90m, {n}x{n} ENU grid)",
+                "data_label": (
+                    f"Observed-derived DEM terrain (Copernicus GLO-90 ~90 m digital surface model, "
+                    f"{n}x{n} ENU grid)"
+                ),
             }
             _mem_cache_put(key, payload)
             _sqlite_cache_put(key, payload)
