@@ -102,7 +102,44 @@ Environment (Protection) Act 1986 (ss.5, 15-as-amended) · Water Act 1974 (s.25/
 - **Shapely repair never accepts a non-polygon:** `make_valid()` output is type-checked; polygonal components of a `GeometryCollection` are extracted (unioned) and zero-area leftovers (`LineString`, `Point`) are discarded and listed in `discarded_non_polygonal_components`. If repair leaves no polygonal area the parcel is **rejected** with HTTP 422. The response publishes the `geometry` actually used downstream — land-cover masking always uses the repaired geometry, never the raw input ring.
 - Environment knobs: `OVERPASS_URL`, `OVERPASS_TIMEOUT_SEC`, `OVERPASS_MAX_ELEMENTS`, `OVERPASS_MAX_GEOMETRY_POINTS`, `WORLDCOVER_ENABLED`, `WORLDCOVER_URL_PREFIX`, `WORLDCOVER_MAX_WINDOW_PIXELS`, `WORLDCOVER_MAX_SAMPLED_PIXELS`, `WORLDCOVER_TIMEOUT_SEC`, `MAX_PARCEL_VERTICES`, `SCENARIO_MULTIPLIERS_PATH`, `SCENARIO_MULTIPLIER_OVERRIDES`, `PARCEL_CIRCLE_QUAD_SEGS`, `ELEVATION_GRID_SIZE`, `ELEVATION_FAILURE_RETRY_DELAY_SEC`.
 
-The frontend is unchanged in Stage 3A — the landscape endpoints are additive.
+The Stage 3A endpoints are additive; the frontend consumes them in the Environmental Timescape (below).
+
+## Environmental Timescape — topographic sheet (frontend)
+
+The Timescape renders the site's **actual mapped geography** as a Survey-of-India-inspired
+cartographic sheet, with a 2D map and a 3D terrain view built from the same projected features.
+
+- **One data path.** The frontend calls `GET /api/v1/landscape?...&include_geometry=true` once per
+  site + radius, and only when the Timescape tab is opened. `grid_size` is passed through from the
+  elevation the site analysis already loaded, so the terrain layer resolves from the **same
+  `dem:v2` cache key** instead of triggering a second upstream DEM fetch. The base layer is
+  scenario-independent (`base_layer.temporal_invariance`), so switching Present / Development /
+  Future never re-requests it.
+- **Cartography (`src/lib/cartography.ts`).** Pure, unit-tested conversion of the mapped layer into
+  GeoJSON per class. Classification keys off `osm_tags`, not the backend's `layer`/`kind`, because
+  one element legitimately arrives from several layer queries with a different `kind` each time;
+  features are deduped by OSM id with hydrology winning over land use. Closed rings arrive as
+  `LineString`s and are promoted to polygons.
+- **Contours** are marching-squares isolines over the returned DEM samples, with the interval chosen
+  as the finest that still yields at most ~8 contours (5 m on alluvial plains, 10-20 m on rising
+  ground, 50-500 m in mountains). The legend publishes the interval **and the sample spacing**,
+  because interpolating between samples draws a smooth line but does not add native resolution.
+- **Elevation tinting** is one quad per DEM sample cell (a choropleth of the samples), not a
+  smoothly interpolated raster, so the sheet cannot imply detail the grid does not have.
+- **3D (`src/lib/sceneGeography.ts`)** drapes the same features with the same `projectLatLonToScene`
+  projection, so the two views can never disagree. Feature line widths are cartographic, not to
+  scale, and the UI says so.
+- **No remote tile or glyph server.** The MapLibre style is a local object, every source is our own
+  GeoJSON, and place names are HTML labels — the sheet renders offline, in a preview iframe, and on
+  Render, and can never show a road or a coastline our datasets did not supply.
+- **Unavailable layers stay unavailable.** A layer the backend reports as `unavailable` yields an
+  empty collection and a legend entry with its real reason; nothing is synthesised. With no DEM the
+  sheet loses only its contours and tinting and says so explicitly, the mapped geography keeps
+  rendering, and the 3D terrain is an explicitly labelled flat reference plane carrying a 1 km
+  reference graticule — never fake hills and never zeros.
+- **Temporal invariance** is pinned by tests: the base sheet fingerprint is identical across
+  Present / Development / Future for every preset, while the modelled footprint envelope (labelled
+  `modelled`, "not a surveyed boundary") is the only thing that changes.
 
 ## Known limitations & Render persistence note
 - **Render ephemeral SQLite storage:** Without a mounted Render Persistent Disk, container-local `/srv/platform.db` resets on redeploy or idle spin-down (`GET /api/v1/health` reports `storage.mode = "ephemeral_default"`). To keep Open-Meteo usage controlled without relying solely on container disk: (1) backend uses a bounded in-memory LRU cache + single-flight request deduplication + best-effort SQLite `elevation_cache`, (2) `GET /api/v1/elevation` sets `Cache-Control: public, max-age=604800`, and (3) the frontend persists verified DEM grids in a bounded `localStorage` cache (`terralex:elevation_cache:v2`). For server-side persistence across restarts on Render, mount a Persistent Disk and set `DATABASE_URL_SQLITE=/var/data/platform.db`, or migrate to PostgreSQL/PostGIS (`docker-compose.yml`).

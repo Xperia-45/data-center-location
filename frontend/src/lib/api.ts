@@ -9,6 +9,20 @@ export const api={
  analyze:(id:string)=>req<any>(`/sites/${id}/analyze`,{method:'POST'}),
  environment:(id:string)=>req<any>(`/sites/${id}/environment`),
  elevation:(lat:number,lon:number,radius_km:number=5,grid_size:number=20)=>req<any>(`/elevation?lat=${lat}&lon=${lon}&radius_km=${radius_km}&grid_size=${grid_size}`),
+ /**
+  * Stage 3A geographic base layer + development impact layer.
+  * `grid_size` deliberately defaults to the same value as /elevation so the terrain layer hits the
+  * identical `dem:v2` cache key instead of triggering a second upstream DEM fetch.
+  */
+ landscape:(p:{lat:number;lon:number;radius_km:number;grid_size?:number;layers?:string;osm_layers?:string;include_geometry?:boolean;preset?:string;footprint_ha?:number;water_mld?:number;power_mw?:number;refresh?:boolean})=>{
+  const q=new URLSearchParams({lat:String(p.lat),lon:String(p.lon),radius_km:String(p.radius_km),grid_size:String(p.grid_size??20),layers:p.layers??'dem,osm,landcover',include_geometry:String(p.include_geometry??true),preset:p.preset??'baseline'});
+  if(p.osm_layers) q.set('osm_layers',p.osm_layers);
+  if(p.footprint_ha!=null) q.set('footprint_ha',String(p.footprint_ha));
+  if(p.water_mld!=null) q.set('water_mld',String(p.water_mld));
+  if(p.power_mw!=null) q.set('power_mw',String(p.power_mw));
+  if(p.refresh) q.set('refresh','true');
+  return req<any>(`/landscape?${q.toString()}`);
+ },
  legal:(id:string)=>req<{results:LegalResult[]}>(`/sites/${id}/legal`),
  scenario:(id:string,body:any)=>req<any>(`/sites/${id}/scenarios`,{method:'POST',body:JSON.stringify(body)}),
  legislation:()=>req<any[]>('/legal/legislation'),
