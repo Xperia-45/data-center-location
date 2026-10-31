@@ -7,6 +7,8 @@ export const api={
  createSite:(s:Site)=>req<Site>('/sites',{method:'POST',body:JSON.stringify(s)}),
  listSites:()=>req<Site[]>('/sites'),
  analyze:(id:string)=>req<any>(`/sites/${id}/analyze`,{method:'POST'}),
+ environment:(id:string)=>req<any>(`/sites/${id}/environment`),
+ elevation:(lat:number,lon:number,radius_km:number=5,grid_size:number=20)=>req<any>(`/elevation?lat=${lat}&lon=${lon}&radius_km=${radius_km}&grid_size=${grid_size}`),
  legal:(id:string)=>req<{results:LegalResult[]}>(`/sites/${id}/legal`),
  scenario:(id:string,body:any)=>req<any>(`/sites/${id}/scenarios`,{method:'POST',body:JSON.stringify(body)}),
  legislation:()=>req<any[]>('/legal/legislation'),
