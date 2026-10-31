@@ -2,6 +2,8 @@ import { useEffect, useMemo, useRef } from 'react';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import type { Site } from '../lib/api';
+import type { CartographyResult } from '../lib/cartography.ts';
+import { graticulePoints, sceneGeographyFromCartography } from '../lib/sceneGeography.ts';
 import {
   ANALYSIS_RADIUS_UNITS,
   type ElevationGridPayload,
@@ -29,6 +31,12 @@ export interface TimescapeProps {
   temporal: string;
   scenario: string;
   showLegal: boolean;
+  /** Mapped geography from /api/v1/landscape, draped on the terrain. Null until it loads. */
+  cartography?: CartographyResult | null;
+  /** True while the landscape request is in flight. */
+  geographyLoading?: boolean;
+  /** Reason the landscape layer could not be retrieved, for the on-scene notice. */
+  geographyUnavailableReason?: string | null;
 }
 
 function disposeObjectTree(root: THREE.Object3D) {
@@ -60,11 +68,13 @@ export default function Timescape({
   temporal,
   scenario,
   showLegal,
+  cartography = null,
 }: TimescapeProps) {
   const ref = useRef<HTMLDivElement>(null);
   const resetRef = useRef<() => void>(() => {});
   const sceneRef = useRef<THREE.Scene | null>(null);
   const terrainGroupRef = useRef<THREE.Group | null>(null);
+  const geographyGroupRef = useRef<THREE.Group | null>(null);
   const dynamicGroupRef = useRef<THREE.Group | null>(null);
   const lastSiteKeyRef = useRef<string>('');
 
@@ -128,6 +138,10 @@ export default function Timescape({
     scene.add(terrainGroup);
     terrainGroupRef.current = terrainGroup;
 
+    const geographyGroup = new THREE.Group();
+    scene.add(geographyGroup);
+    geographyGroupRef.current = geographyGroup;
+
     const dynamicGroup = new THREE.Group();
     scene.add(dynamicGroup);
     dynamicGroupRef.current = dynamicGroup;
@@ -157,8 +171,10 @@ export default function Timescape({
       window.removeEventListener('resize', onResize);
       resizeObs?.disconnect();
       disposeObjectTree(terrainGroup);
+      disposeObjectTree(geographyGroup);
       disposeObjectTree(dynamicGroup);
       terrainGroupRef.current = null;
+      geographyGroupRef.current = null;
       dynamicGroupRef.current = null;
       sceneRef.current = null;
       controls.dispose();
@@ -224,11 +240,88 @@ export default function Timescape({
       flatPlane.rotation.x = -Math.PI / 2;
       terrainGroup.add(flatPlane);
 
-      const gridHelper = new THREE.GridHelper(TERRAIN_SPAN, 20, 0x64748b, 0x334155);
-      gridHelper.position.y = 0.03;
-      terrainGroup.add(gridHelper);
+      // A 1 km reference graticule, not a game grid: it states the scale of the flat plane and
+      // nothing about relief. Mapped geography (rivers, roads, water) is still draped on top by
+      // the geography pass, so a missing DEM does not leave an empty plane.
+      const graticuleMat = new THREE.LineBasicMaterial({
+        color: 0x8ea6b8, transparent: true, opacity: 0.42,
+      });
+      for (const line of graticulePoints(radiusKm, 1)) {
+        const geo = new THREE.BufferGeometry().setFromPoints(
+          line.map((p) => new THREE.Vector3(p.x, p.y, p.z))
+        );
+        terrainGroup.add(new THREE.Line(geo, graticuleMat));
+      }
     }
   }, [activeElevation, terrainParams, radiusKm]);
+
+  // Drape the mapped geography on the terrain. This is the SAME projection and the SAME retrieved
+  // features the 2D topographic sheet draws, so the two views can never disagree - and when the
+  // DEM is unavailable the features still draw, flattened onto the labelled reference plane.
+  useEffect(() => {
+    const group = geographyGroupRef.current;
+    if (!group || !site) return;
+    disposeObjectTree(group);
+    if (!cartography) return;
+
+    const draped = sceneGeographyFromCartography({
+      layers: cartography.layers as any,
+      site,
+      elevation: activeElevation,
+    });
+
+    const AREA_COLORS: Record<string, number> = {
+      water_area: 0x3f7fbf,
+      wetland: 0x6f9fb5,
+      vegetation: 0x4f7a3a,
+      farmland: 0x8a7f45,
+      settlement: 0x9a7f5f,
+      protected: 0x7d6b3f,
+    };
+    const AREA_OPACITY: Record<string, number> = {
+      water_area: 0.82, wetland: 0.66, vegetation: 0.6, farmland: 0.45, settlement: 0.5, protected: 0.4,
+    };
+
+    for (const area of draped.areas) {
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute('position', new THREE.Float32BufferAttribute(area.triangles, 3));
+      geo.computeVertexNormals();
+      const mesh = new THREE.Mesh(
+        geo,
+        new THREE.MeshStandardMaterial({
+          color: AREA_COLORS[area.class] ?? 0x8899aa,
+          transparent: true,
+          opacity: AREA_OPACITY[area.class] ?? 0.5,
+          roughness: 0.95,
+          metalness: 0.02,
+          side: THREE.DoubleSide,
+        })
+      );
+      mesh.name = `geo-area:${area.class}:${area.id}`;
+      group.add(mesh);
+    }
+
+    for (const line of draped.lines) {
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute('position', new THREE.Float32BufferAttribute(line.vertices, 3));
+      geo.computeVertexNormals();
+      const isWater = line.class === 'waterway';
+      const mesh = new THREE.Mesh(
+        geo,
+        new THREE.MeshStandardMaterial({
+          // Seasonal drainage (a choe, a monsoon nullah) is paler, matching the dashed 2D sheet.
+          color: isWater ? (line.intermittent ? 0x8fb8d8 : 0x2f6fa8) : 0xb08d62,
+          transparent: true,
+          opacity: isWater ? (line.intermittent ? 0.6 : 0.92) : 0.85,
+          roughness: 0.9,
+          metalness: 0.02,
+          side: THREE.DoubleSide,
+        })
+      );
+      mesh.name = `geo-line:${line.class}:${line.id}`;
+      group.add(mesh);
+    }
+  }, [cartography, activeElevation, radiusKm, site]);
 
   // Update dynamic campus, radius boundary, and ENU-projected features
   useEffect(() => {

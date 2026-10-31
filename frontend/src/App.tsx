@@ -1,8 +1,16 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { api, Site, Finding } from './lib/api';
 import MapView from './components/MapView';
 import Timescape from './components/Timescape';
-import { SITE_PRESETS, PresetKey } from './lib/timescapeMath';
+import TopoSheet from './components/TopoSheet';
+import {
+  buildCartography,
+  contoursFromGrid,
+  elevationTintCells,
+  footprintEnvelope,
+  summarizeSheet,
+} from './lib/cartography';
+import { SITE_PRESETS, PresetKey, isValidElevationGrid } from './lib/timescapeMath';
 import { syncElevationWithClientCache } from './lib/elevationCache';
 import {
   ActiveSiteWorkspaceState,
@@ -15,6 +23,7 @@ import {
   getValidatedFeaturesForSite,
   isTimescapeReady,
   onFormCoordinatesChanged,
+  resolveLandscapeBaseLayer,
 } from './lib/siteState';
 import {
   MapPin,
@@ -90,6 +99,17 @@ export default function App() {
   const [sources, setSources] = useState<any[]>([]);
   const [legalQuery, setLegalQuery] = useState('');
   const [searchResults, setSearchResults] = useState<any[]>([]);
+  // Stage 3A geographic base layer for the topographic sheet. Fetched once per site+radius and
+  // only when the Timescape is opened: the base layer is scenario-independent, so switching
+  // Present / Development / Future must never re-request it.
+  const [landscape, setLandscape] = useState<any>(null);
+  // Which site the loaded payload belongs to. Without this the previous site's geography is
+  // drawn against the new site's coordinates while the next request is in flight.
+  const [landscapeFor, setLandscapeFor] = useState('');
+  const [landscapeBusy, setLandscapeBusy] = useState(false);
+  const [landscapeErr, setLandscapeErr] = useState('');
+  const [sheetMode, setSheetMode] = useState<'2d' | '3d'>('2d');
+  const landscapeKeyRef = useRef<string>('');
 
   const refresh = () => api.listSites().then(setSites).catch(() => {});
   useEffect(() => {
@@ -194,6 +214,105 @@ export default function App() {
   }
 
   const { site, analysis, legal, scenario, loadingAnalysis } = workspace;
+
+  // ---- Stage 3A geographic base layer for the topographic sheet -------------------------
+  // One request per site + radius, only when the Timescape is open. The base layer is
+  // scenario-independent (`base_layer.temporal_invariance`), so switching Present / Development /
+  // Future never re-fetches it, and `grid_size` matches the elevation the analysis already loaded
+  // so the DEM resolves from the same `dem:v2` cache key instead of a second upstream fetch.
+  const landscapeSiteKey = site?.id ? `${site.id}:${site.radius_km}` : '';
+  const landscapeGridSize = analysis?.elevation?.grid_size ?? 20;
+  useEffect(() => {
+    if (view !== 'timescape' || !site?.id) return;
+    if (landscape && landscapeKeyRef.current === landscapeSiteKey) return;
+    let cancelled = false;
+    landscapeKeyRef.current = landscapeSiteKey;
+    setLandscapeBusy(true);
+    setLandscapeErr('');
+    api
+      .landscape({
+        lat: site.lat,
+        lon: site.lon,
+        radius_km: site.radius_km,
+        grid_size: landscapeGridSize,
+        layers: 'dem,osm,landcover',
+        include_geometry: true,
+        footprint_ha: site.footprint_ha,
+        water_mld: site.water_mld,
+        power_mw: site.power_mw,
+      })
+      .then((payload) => {
+        if (cancelled) return;
+        setLandscape(payload);
+        setLandscapeFor(landscapeSiteKey);
+      })
+      .catch((e: any) => {
+        if (cancelled) return;
+        setLandscape(null);
+        setLandscapeErr(e?.message ?? 'landscape request failed');
+      })
+      .finally(() => { if (!cancelled) setLandscapeBusy(false); });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [view, landscapeSiteKey, landscapeGridSize]);
+
+  // Only the payload belonging to the CURRENT site may be drawn - the same guard the 3D scene
+  // applies to features and elevation.
+  const baseLayer = resolveLandscapeBaseLayer({
+    payload: landscape,
+    payloadSiteKey: landscapeFor,
+    siteKey: landscapeSiteKey,
+  });
+
+  /** Single elevation source shared by the 2D sheet and the 3D terrain, so they cannot disagree. */
+  const sheetTerrain = useMemo(() => {
+    const fromAnalysis = analysis?.elevation;
+    if (isValidElevationGrid(fromAnalysis)) return fromAnalysis;
+    const fromLandscape = baseLayer?.terrain;
+    if (isValidElevationGrid(fromLandscape)) return fromLandscape;
+    return null;
+  }, [analysis, baseLayer]);
+
+  const sheetCartography = useMemo(
+    () => buildCartography({ features: baseLayer?.osm?.features ?? null, radiusKm: site?.radius_km ?? 5 }),
+    [baseLayer, site]
+  );
+  const sheetContours = useMemo(
+    () => contoursFromGrid({
+      values_m: sheetTerrain?.values_m ?? null,
+      min_m: sheetTerrain?.min_m ?? null,
+      max_m: sheetTerrain?.max_m ?? null,
+      span_km: sheetTerrain?.span_km ?? null,
+      lat: site?.lat ?? 0,
+      lon: site?.lon ?? 0,
+    }),
+    [sheetTerrain, site]
+  );
+  const sheetTint = useMemo(
+    () => elevationTintCells({
+      values_m: sheetTerrain?.values_m ?? null,
+      min_m: sheetTerrain?.min_m ?? null,
+      max_m: sheetTerrain?.max_m ?? null,
+      span_km: sheetTerrain?.span_km ?? null,
+      lat: site?.lat ?? 0,
+      lon: site?.lon ?? 0,
+    }),
+    [sheetTerrain, site]
+  );
+  const sheetSummary = useMemo(
+    () => summarizeSheet({
+      // Report the elevation the sheet is actually drawing, whichever source supplied it.
+      baseLayer: { ...(baseLayer ?? {}), terrain: sheetTerrain ?? baseLayer?.terrain ?? null },
+      cartography: sheetCartography,
+      contours: sheetContours,
+    }),
+    [baseLayer, sheetTerrain, sheetCartography, sheetContours]
+  );
+  const sheetFootprint = useMemo(
+    () => footprintEnvelope({ lat: site?.lat ?? 0, lon: site?.lon ?? 0, footprintHa: site?.footprint_ha ?? null }),
+    [site]
+  );
+
   const timescapeReady = isTimescapeReady(workspace);
   const timescapeFeatures = getValidatedFeaturesForSite(workspace);
   const mapFeatures = getValidatedFeaturesForSite(workspace, form);
@@ -590,19 +709,70 @@ export default function App() {
                     Legal overlays (red rings = wetland/protected/forest)
                   </label>
                 </div>
-                <div className="card">
-                  <Timescape
-                    site={site}
-                    features={timescapeFeatures}
-                    elevation={analysis.elevation}
-                    analysisSiteId={analysis.site_id}
-                    dataLabel={analysis.data_label}
-                    loading={loadingAnalysis}
-                    temporal={temporal}
-                    scenario={scenarioName}
-                    showLegal={showLegal}
-                  />
+                <div className="flex flex-wrap items-center gap-2">
+                  <div className="flex overflow-hidden rounded-lg border border-slate-600">
+                    <button
+                      className={sheetMode === '2d' ? 'btn' : 'btn2'}
+                      onClick={() => setSheetMode('2d')}
+                      title="Cartographic sheet drawn from retrieved datasets"
+                    >
+                      2D topographic sheet
+                    </button>
+                    <button
+                      className={sheetMode === '3d' ? 'btn' : 'btn2'}
+                      onClick={() => setSheetMode('3d')}
+                      title="Same geography draped on the DEM terrain"
+                    >
+                      3D terrain
+                    </button>
+                  </div>
+                  <span className="text-xs opacity-70">
+                    {sheetSummary.mappedFeatures} mapped features
+                    {baseLayer ? ` · ${baseLayer.osm?.detail ?? ''}` : landscapeBusy ? ' · loading geography…' : ''}
+                  </span>
+                  {landscapeErr ? (
+                    <span className="text-xs text-amber-300">
+                      Geographic base layer unavailable: {landscapeErr}. Terrain and scenario views still work.
+                    </span>
+                  ) : null}
                 </div>
+
+                {sheetMode === '2d' ? (
+                  <TopoSheet
+                    site={site}
+                    cartography={sheetCartography}
+                    contours={sheetContours}
+                    tint={sheetTint}
+                    summary={sheetSummary}
+                    footprint={sheetFootprint}
+                    terrainValues={sheetTerrain?.values_m ?? null}
+                    scenarioLabel={scenarioName}
+                    temporal={temporal}
+                    loading={landscapeBusy}
+                  />
+                ) : (
+                  <div className="card">
+                    <Timescape
+                      site={site}
+                      features={timescapeFeatures}
+                      elevation={analysis.elevation}
+                      analysisSiteId={analysis.site_id}
+                      dataLabel={analysis.data_label}
+                      loading={loadingAnalysis}
+                      temporal={temporal}
+                      scenario={scenarioName}
+                      showLegal={showLegal}
+                      cartography={sheetCartography}
+                    />
+                    <p className="mt-2 text-xs opacity-70">
+                      Same retrieved geography as the 2D sheet, draped on the DEM. Feature line widths are
+                      cartographic, not to scale.
+                      {!sheetSummary.terrainAvailable
+                        ? ' Elevation is unavailable, so the terrain is an explicitly labelled flat reference plane with a 1 km graticule - no elevation has been estimated.'
+                        : ` Terrain is ${sheetSummary.dataClass} (Copernicus GLO-90 DSM, ~${sheetSummary.resolutionM} m).`}
+                    </p>
+                  </div>
+                )}
               </>
             ) : (
               <div className="card space-y-2">
