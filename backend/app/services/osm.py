@@ -47,9 +47,10 @@ OVERPASS_TIMEOUT_SEC = float(os.getenv("OVERPASS_TIMEOUT_SEC", "15"))
 OVERPASS_MIRROR_ATTEMPTS = max(1, int(os.getenv("OVERPASS_MIRROR_ATTEMPTS", "1")))
 
 # Client-side conditions that another instance may well survive.
-RETRYABLE_HTTP_STATUS = frozenset({408, 429, 500, 502, 503, 504, 404})
 # Conditions that are about OUR request, not the instance: every mirror runs the same Overpass
-# QL, so retrying elsewhere cannot help and would only multiply the load.
+# QL, so retrying elsewhere cannot help and would only multiply the load. Anything not listed
+# here - timeouts, transport errors, 429, 504, 404, other 5xx, a 200 carrying a non-JSON body -
+# does fail over, because it describes the instance rather than the query.
 NON_RETRYABLE_HTTP_STATUS = frozenset({400, 401, 403, 405, 413, 422})
 
 
