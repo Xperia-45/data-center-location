@@ -180,7 +180,7 @@ export default function Timescape({
     scene.fog = new THREE.Fog(bgHex, 85, 190);
 
     if (measured && terrainParams.minM !== null && terrainParams.maxM !== null) {
-      // Measured Copernicus DEM terrain mesh with hypsometric vertex shading
+      // Real (observed-derived) Copernicus DEM terrain mesh with hypsometric vertex shading
       const segs = 56;
       const geo = new THREE.PlaneGeometry(TERRAIN_SPAN, TERRAIN_SPAN, segs, segs);
       const pos = geo.attributes.position;
@@ -355,7 +355,7 @@ export default function Timescape({
     <div className="space-y-2">
       {terrainParams.isMeasured ? (
         <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs bg-emerald-500/15 border border-emerald-400/30 text-emerald-100 rounded-lg px-3 py-2">
-          <span className="font-bold text-emerald-300">Measured DEM Terrain</span>
+          <span className="font-bold text-emerald-300">Observed-derived DEM Terrain (DSM)</span>
           <span>
             Site elevation: <b>{terrainParams.centerM?.toFixed(1)} m AMSL</b>
           </span>
@@ -365,6 +365,10 @@ export default function Timescape({
           </span>
           <span>
             Grid: <b>{terrainParams.gridSize}×{terrainParams.gridSize}</b> (~90 m DEM)
+          </span>
+          <span>
+            Class: <b>{activeElevation?.data_class || 'observation_derived'}</b> — Copernicus GLO-90 is a{' '}
+            <b>digital surface model</b> (includes canopy and structures; not bare-earth terrain)
           </span>
           <span>
             Vertical exaggeration: <b>{terrainParams.verticalExaggeration}×</b>

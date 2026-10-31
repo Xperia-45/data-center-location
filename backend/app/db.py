@@ -31,6 +31,29 @@ def conn():
     c.row_factory = sqlite3.Row
     return c
 
+# Cache rows written before the provenance correction (namespaces `dem:v1` /
+# `landscape:v1`). They are unreachable under the current namespaces; dropping them keeps
+# a stale payload from ever being served again. Cache tables only - never user data.
+LEGACY_CACHE_PREFIXES = (
+    ("elevation_cache", "dem:v1:%"),
+    ("landscape_cache", "landscape:v1:%"),
+)
+
+
+def purge_legacy_cache_rows() -> int:
+    removed = 0
+    try:
+        c = conn()
+        for table, prefix in LEGACY_CACHE_PREFIXES:
+            cur = c.execute(f"DELETE FROM {table} WHERE cache_key LIKE ?", (prefix,))
+            removed += cur.rowcount or 0
+        c.commit()
+        c.close()
+    except (sqlite3.Error, OSError):
+        pass
+    return removed
+
+
 def init_db():
     c = conn()
     c.executescript("""
@@ -57,3 +80,4 @@ def init_db():
             c.execute("INSERT INTO amendments VALUES (?,?,?,?,?,?,?)", tuple(a[k] for k in ["id","legislation_id","amendment_date","effective","affected","document_url","status"]))
     c.commit()
     c.close()
+    purge_legacy_cache_rows()

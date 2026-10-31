@@ -51,7 +51,32 @@ LAYER_MODEL_NOTE = (
 
 DEFAULT_PROJECT = {"footprint_ha": 10.0, "water_mld": 1.0, "power_mw": 20.0, "source": "platform defaults"}
 
-_cache = NamespacedCache("landscape:v1", table="landscape_cache", max_entries=64)
+
+def cached_base_layer_is_current(base: dict) -> bool:
+    """
+    Read-time guard for the assembled base layer.
+
+    Rows written before the provenance correction classify the Copernicus DEM terrain as
+    `measured`. The namespace bump to `landscape:v2` already makes them unreachable; this
+    guard is the second guarantee, so such a payload is a cache miss even if an old row
+    survives (e.g. a database restored from a Persistent Disk backup).
+    """
+    if not isinstance(base, dict):
+        return False
+    terrain = base.get("terrain")
+    if not isinstance(terrain, dict):
+        return True  # the DEM was not part of this base layer
+    if terrain.get("status") != "ok":
+        return True  # an explicitly unavailable terrain carries no classification claim
+    return terrain.get("data_class") == "observation_derived" and bool(terrain.get("surface_model"))
+
+
+_cache = NamespacedCache(
+    "landscape:v2",
+    table="landscape_cache",
+    max_entries=64,
+    validator=cached_base_layer_is_current,
+)
 # Independent land-cover tier: a raster read that succeeded must not be repeated just
 # because a different layer (e.g. one OSM query) failed on the same request.
 _landcover_cache = NamespacedCache("landcover:v1", table="landscape_cache", max_entries=64)

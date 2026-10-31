@@ -3,8 +3,16 @@ Stage 3A — generic namespaced cache (bounded LRU + best-effort SQLite + single
 
 Cache keys are namespaced and always include the site coordinates, the analysis radius
 and the resolution/layer selection, so one site or one resolution can never serve
-another site's geography. `elevation.py` keeps its own dedicated cache stack (with
-Open-Meteo specific rate-limit cooldown state) and is deliberately left untouched.
+another site's geography.
+
+A namespace is VERSIONED (e.g. `landscape:v2`): bump it whenever the payload schema
+changes, so entries written by older code become unreachable. An optional `validator`
+adds a second guarantee at read time - a payload that fails it is treated as a cache
+miss and evicted, so a stale payload can never be served even if an old row survives.
+
+`elevation.py` keeps its own dedicated cache stack (with Open-Meteo specific rate-limit
+cooldown state) and applies the same rule: its namespace is versioned (`dem:v2`) and its
+read paths refuse a payload that predates the current provenance fields.
 """
 
 from __future__ import annotations
@@ -15,6 +23,7 @@ import hashlib
 import json
 import sqlite3
 from collections import OrderedDict
+from collections.abc import Callable
 
 from ..db import conn
 
@@ -34,12 +43,19 @@ def short_digest(*parts: object, length: int = 16) -> str:
 class NamespacedCache:
     """Bounded in-memory LRU backed by a SQLite table, with single-flight deduplication."""
 
-    def __init__(self, namespace: str, table: str = "landscape_cache", max_entries: int = 64):
+    def __init__(
+        self,
+        namespace: str,
+        table: str = "landscape_cache",
+        max_entries: int = 64,
+        validator: Callable[[dict], bool] | None = None,
+    ):
         if table not in ALLOWED_TABLES:
             raise ValueError(f"cache table must be one of {ALLOWED_TABLES}")
         self.namespace = namespace
         self.table = table
         self.max_entries = max(1, int(max_entries))
+        self.validator = validator
         self._mem: OrderedDict[str, dict] = OrderedDict()
         self._locks: dict[str, asyncio.Lock] = {}
         self._counts: dict[str, int] = {}
@@ -49,10 +65,25 @@ class NamespacedCache:
         ordered = ":".join(f"{k}={parts[k]}" for k in sorted(parts))
         return f"{self.namespace}:{ordered}"
 
+    # -- schema guard -------------------------------------------------------
+    def _accept(self, key: str, payload: dict) -> bool:
+        """False (and evict) when a payload was written by an older, superseded schema."""
+        if self.validator is None:
+            return True
+        try:
+            accepted = bool(self.validator(payload))
+        except Exception:  # pragma: no cover - a broken validator must fail closed
+            accepted = False
+        if not accepted:
+            self._mem.pop(key, None)
+        return accepted
+
     # -- memory tier --------------------------------------------------------
     def _mem_get(self, key: str) -> dict | None:
         item = self._mem.get(key)
         if item is None:
+            return None
+        if not self._accept(key, item):
             return None
         self._mem.move_to_end(key)
         out = dict(item)
@@ -80,6 +111,8 @@ class NamespacedCache:
         except (ValueError, TypeError):
             return None
         if not isinstance(parsed, dict):
+            return None
+        if not self._accept(key, parsed):
             return None
         self._mem_put(key, parsed)
         out = dict(parsed)
