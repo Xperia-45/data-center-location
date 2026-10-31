@@ -3,11 +3,23 @@ from typing import Annotated
 from fastapi import FastAPI, HTTPException, Query, Response
 from fastapi.middleware.cors import CORSMiddleware
 from .db import init_db, conn, get_storage_persistence_info
-from .schemas import SiteIn, ScenarioIn, LegalSearch
+from .schemas import SiteIn, ScenarioIn, LegalSearch, ParcelValidateIn, LandscapeRequest
 from .services.elevation import DEFAULT_ELEVATION_GRID_SIZE, get_elevation_grid
 from .services.environment import analyze, sort_features_by_distance
 from .services.legal import evaluate
 from .services.scenarios import simulate, PRESETS
+from .services.datasets import data_sources_view
+from .services.datasets import registry_payload as dataset_registry_payload
+from .services.landscape import get_landscape
+from .services.osm import DISTANCE_BASIS_NOTES, LAYER_SPECS
+from .services.parcels import (
+    ParcelValidationUnavailable,
+    ParcelValidationError,
+    shapely_available,
+    validate_parcel,
+)
+from .services.scenario_multipliers import MultiplierConfigError
+from .services.scenario_multipliers import registry_payload as multiplier_registry_payload
 
 app = FastAPI(title="Environmental Intelligence Platform", version="1.0.0", docs_url="/api/docs")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
@@ -197,56 +209,187 @@ def import_template():
 
 @app.get("/api/v1/data-sources")
 def sources():
-    return [
-        {
-            "provider": "OpenStreetMap / Overpass API",
-            "dataset": "Water, wetland, forest, settlements",
-            "url": "https://overpass-api.de",
-            "license": "ODbL",
-            "quality": "Third-party",
-            "status": "Integrated (live, with labelled synthetic fallback)",
+    """
+    Legacy provenance list (Stage 1/2 response shape, keys consumed by the frontend).
+    Stage 3A: derived from the single dataset registry in services/datasets.py.
+    """
+    return data_sources_view()
+
+
+# ---------------------------------------------------------------------------
+# Stage 3A - landscape (geographic base layer + development impact layer)
+# ---------------------------------------------------------------------------
+
+def _landscape_cache_headers(response: Response, payload: dict) -> None:
+    """Cache the base geography; never let a degraded response be stored by clients."""
+    if payload.get("all_layers_ok"):
+        response.headers["Cache-Control"] = "public, max-age=86400, stale-while-revalidate=604800"
+    else:
+        response.headers["Cache-Control"] = "no-store"
+
+
+def _split_csv(raw: str | None) -> list[str] | None:
+    if raw is None or not str(raw).strip():
+        return None
+    return [part.strip() for part in str(raw).split(",") if part.strip()]
+
+
+@app.get("/api/v1/landscape")
+async def landscape(
+    response: Response,
+    lat: float = Query(..., ge=-90, le=90),
+    lon: float = Query(..., ge=-180, le=180),
+    radius_km: float = Query(default=5.0, gt=0, le=50),
+    grid_size: int = Query(default=DEFAULT_ELEVATION_GRID_SIZE, ge=2, le=32),
+    layers: str | None = Query(default=None, description="Comma separated: dem,osm,landcover"),
+    osm_layers: str | None = Query(default=None, description="Comma separated OSM layer ids"),
+    include_geometry: bool = Query(default=False),
+    preset: str = Query(default="baseline"),
+    footprint_ha: float | None = Query(default=None, gt=0, le=1000),
+    water_mld: float | None = Query(default=None, ge=0, le=100),
+    power_mw: float | None = Query(default=None, gt=0, le=2000),
+    refresh: bool = Query(default=False),
+):
+    """
+    Geographic base layer + development impact layer for free coordinates.
+
+    The base layer (terrain / mapped geography / land cover) is scenario-independent;
+    only `development_impact_layer` changes with `preset`.
+    """
+    project = {"footprint_ha": footprint_ha, "water_mld": water_mld, "power_mw": power_mw}
+    payload = await get_landscape(
+        lat=lat,
+        lon=lon,
+        radius_km=radius_km,
+        grid_size=grid_size,
+        layers=_split_csv(layers),
+        osm_layers=_split_csv(osm_layers),
+        include_geometry=include_geometry,
+        project=project,
+        preset=preset,
+        use_cache=not refresh,
+    )
+    _landscape_cache_headers(response, payload)
+    return payload
+
+
+@app.post("/api/v1/landscape")
+async def landscape_with_parcel(req: LandscapeRequest, response: Response):
+    """
+    Landscape for free coordinates plus an OPTIONAL parcel polygon.
+
+    When the parcel validates it becomes the land-cover AOI and the impact-layer site
+    area; when it does not, the reason is returned and the base layer falls back to the
+    site circle rather than masking with an unusable geometry.
+    """
+    payload = await get_landscape(
+        lat=req.lat,
+        lon=req.lon,
+        radius_km=req.radius_km,
+        grid_size=req.grid_size,
+        layers=req.layers,
+        osm_layers=req.osm_layers,
+        include_geometry=req.include_geometry,
+        parcel_geojson=req.parcel_geojson,
+        project=req.project.model_dump() if req.project else None,
+        preset=req.preset,
+        use_cache=not req.refresh,
+    )
+    _landscape_cache_headers(response, payload)
+    return payload
+
+
+@app.get("/api/v1/sites/{site_id}/landscape")
+async def site_landscape(
+    site_id: str,
+    response: Response,
+    grid_size: Annotated[int | None, Query(ge=2, le=32)] = None,
+    layers: str | None = Query(default=None, description="Comma separated: dem,osm,landcover"),
+    osm_layers: str | None = Query(default=None),
+    include_geometry: bool = Query(default=False),
+    preset: str = Query(default="baseline"),
+    refresh: bool = Query(default=False),
+):
+    """Landscape for a saved site, using the site's own project inputs."""
+    site = get_site(site_id)
+    payload = await get_landscape(
+        lat=site["lat"],
+        lon=site["lon"],
+        radius_km=site["radius_km"],
+        grid_size=grid_size,
+        layers=_split_csv(layers),
+        osm_layers=_split_csv(osm_layers),
+        include_geometry=include_geometry,
+        project={
+            "footprint_ha": site["footprint_ha"],
+            "water_mld": site["water_mld"],
+            "power_mw": site["power_mw"],
         },
-        {
-            "provider": "Open-Meteo Elevation API / Copernicus DEM",
-            "dataset": "Copernicus DEM 2021 release GLO-90 (90m terrain elevation, DOI: 10.5270/ESA-c5d3d65)",
-            "url": "https://open-meteo.com/en/docs/elevation-api",
-            "license": "CC BY 4.0 (non-commercial free tier) / Copernicus open licence",
-            "quality": "Measured global DEM (~90m)",
-            "status": "Integrated (configurable ENU grid, default 20x20 in <=100-point batches, cached, with explicit flat fallback if unavailable)",
+        preset=preset,
+        use_cache=not refresh,
+    )
+    payload["site"]["site_id"] = site_id
+    payload["site"]["name"] = site["name"]
+    _landscape_cache_headers(response, payload)
+    return payload
+
+
+@app.get("/api/v1/landscape/layers")
+def landscape_layers():
+    """Catalogue of OSM base-layer queries and the distance semantics each one reports."""
+    return {
+        "osm_layers": {
+            lid: {
+                "label": spec["label"],
+                "kind": spec["kind"],
+                "linear_feature": spec["linear"],
+                "data_class": "mapped",
+                "source": "OpenStreetMap contributors via Overpass API",
+                "legal_trigger_keys": spec["trigger_keys"],
+            }
+            for lid, spec in LAYER_SPECS.items()
         },
-        {
-            "provider": "India Code",
-            "dataset": "Central Acts full text",
-            "url": "https://www.indiacode.nic.in",
-            "license": "Official source",
-            "quality": "Verified official",
-            "status": "Curated seed import; manual import pipeline",
-        },
-        {
-            "provider": "MoEFCC / PARIVESH",
-            "dataset": "EIA Notification & clearances",
-            "url": "https://environmentclearance.nic.in",
-            "license": "Official source",
-            "quality": "Verified official",
-            "status": "Referenced in legal DB",
-        },
-        {
-            "provider": "CGWA",
-            "dataset": "Groundwater NOC guidelines",
-            "url": "https://cgwa-noc.gov.in",
-            "license": "Official source",
-            "quality": "Verified official",
-            "status": "Referenced in legal DB",
-        },
-        {
-            "provider": "WRI Aqueduct / IMD / CWC",
-            "dataset": "Water stress, flood, climate hazards",
-            "url": "https://www.wri.org/aqueduct",
-            "license": "Check provider terms",
-            "quality": "Not yet integrated",
-            "status": "Planned - shown as UNAVAILABLE, never fabricated",
-        },
-    ]
+        "distance_basis_definitions": DISTANCE_BASIS_NOTES,
+        "landscape_layers": ["dem", "osm", "landcover"],
+        "note": (
+            "Distances to mapped linear features depend on the reported distance_basis. "
+            "A centroid distance is not a perpendicular distance to the feature."
+        ),
+    }
+
+
+@app.post("/api/v1/parcel/validate")
+def parcel_validate(inp: ParcelValidateIn):
+    """
+    Validates an optional user parcel polygon (GeoJSON Polygon/MultiPolygon) with Shapely.
+
+    422 = geometry unusable. 503 = Shapely unavailable, so the parcel is NOT accepted.
+    """
+    site = inp.site.model_dump() if inp.site else None
+    try:
+        return validate_parcel(inp.geojson, site)
+    except ParcelValidationError as exc:
+        raise HTTPException(422, str(exc))
+    except ParcelValidationUnavailable as exc:
+        raise HTTPException(503, str(exc))
+
+
+@app.get("/api/v1/datasets")
+def datasets():
+    """Dataset provenance + availability registry (measured / mapped / estimated / modelled)."""
+    return dataset_registry_payload()
+
+
+@app.get("/api/v1/scenario-multipliers")
+def scenario_multipliers():
+    """Configurable scenario multipliers with bounds, basis and explicit NOT MODELLED list."""
+    try:
+        payload = multiplier_registry_payload()
+    except MultiplierConfigError as exc:
+        raise HTTPException(400, str(exc))
+    payload["shapely_available"] = shapely_available()
+    return payload
+
 
 @app.get("/api/v1/scenario-presets")
 def presets():

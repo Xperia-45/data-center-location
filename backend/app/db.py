@@ -38,6 +38,7 @@ def init_db():
     CREATE TABLE IF NOT EXISTS analyses(id TEXT PRIMARY KEY, site_id TEXT, payload TEXT, created_at TEXT);
     CREATE TABLE IF NOT EXISTS scenarios(id TEXT PRIMARY KEY, site_id TEXT, payload TEXT, created_at TEXT);
     CREATE TABLE IF NOT EXISTS elevation_cache(cache_key TEXT PRIMARY KEY, payload TEXT, created_at TEXT);
+    CREATE TABLE IF NOT EXISTS landscape_cache(cache_key TEXT PRIMARY KEY, payload TEXT, created_at TEXT);
     CREATE TABLE IF NOT EXISTS legislation(id TEXT PRIMARY KEY, title TEXT, type TEXT, jurisdiction TEXT, authority TEXT, enacted TEXT, effective TEXT, status TEXT, source_url TEXT, source_authority TEXT, retrieved TEXT, verified TEXT, version TEXT, checksum TEXT);
     CREATE TABLE IF NOT EXISTS provisions(id TEXT PRIMARY KEY, legislation_id TEXT, section TEXT, subsection TEXT, original_text TEXT, explanation TEXT, applicability TEXT, authority TEXT);
     CREATE TABLE IF NOT EXISTS requirements(id TEXT PRIMARY KEY, legislation_id TEXT, provision_id TEXT, trigger_key TEXT, trigger_description TEXT, approval TEXT, authority TEXT, consequence_type TEXT, consequence TEXT);

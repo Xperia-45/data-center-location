@@ -1,67 +1,30 @@
-import asyncio, math, httpx
+"""
+Environmental findings for a site (Stage 1/2 contract preserved).
+
+Stage 3A moved OSM access into `services/osm.py` (per-layer queries, distance semantics,
+optional geometry). This module keeps the exact Stage 1/2 output contract - same keys,
+same ordering, same labelled synthetic fallback - and adds nothing that changes the
+existing `/api/v1/sites/{id}/analyze` and `/environment` payloads.
+"""
+import asyncio
 from .elevation import get_elevation_grid
+from .geo import haversine_km as haversine
+from .osm import legacy_overpass_features, sort_features_by_distance
 
-def haversine(a, b, c, d):
-    R = 6371
-    p1, p2 = math.radians(a), math.radians(c)
-    dp = math.radians(c - a)
-    dl = math.radians(d - b)
-    x = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
-    return 2 * R * math.asin(math.sqrt(x))
+__all__ = ["analyze", "sort_features_by_distance", "overpass_features", "haversine", "classify", "triggers_for"]
 
-def sort_features_by_distance(feats):
-    """Return environmental features ordered nearest-first with deterministic tie-breaking."""
-    return sorted(
-        feats,
-        key=lambda f: (
-            f.get("distance_km", float("inf")) if f.get("distance_km") is not None else float("inf"),
-            f.get("kind", ""),
-            f.get("name", ""),
-        ),
-    )
 
 async def overpass_features(lat, lon, radius_km):
-    """Real OSM data via Overpass. Returns (features, ok) sorted by distance_km ascending."""
-    q = f"""[out:json][timeout:12];(node(around:{int(radius_km*1000)},{lat},{lon})[natural=water];way(around:{int(radius_km*1000)},{lat},{lon})[natural=water];way(around:{int(radius_km*1000)},{lat},{lon})[waterway];way(around:{int(radius_km*1000)},{lat},{lon})[landuse=forest];way(around:{int(radius_km*1000)},{lat},{lon})[natural=wetland];way(around:{int(radius_km*1000)},{lat},{lon})[leisure=nature_reserve];node(around:{int(radius_km*1000)},{lat},{lon})[place~"village|town|city|hamlet"];);out center 500;"""
-    try:
-        async with httpx.AsyncClient(timeout=15) as cl:
-            r = await cl.post(
-                "https://overpass-api.de/api/interpreter",
-                data={"data": q},
-                headers={"User-Agent": "EnvIntelligencePlatform/0.1 hackathon"},
-            )
-            r.raise_for_status()
-            els = r.json().get("elements", [])
-    except Exception:
-        return [], False
-    feats = []
-    for e in els:
-        c = e.get("center") or {"lat": e.get("lat"), "lon": e.get("lon")}
-        if c.get("lat") is None or c.get("lon") is None:
-            continue
-        tags = e.get("tags", {})
-        kind = (
-            "water"
-            if tags.get("natural") == "water" or "waterway" in tags
-            else "forest"
-            if tags.get("landuse") == "forest"
-            else "wetland"
-            if tags.get("natural") == "wetland"
-            else "protected"
-            if "nature_reserve" in str(tags.get("leisure"))
-            else "settlement"
-        )
-        feats.append(
-            {
-                "name": tags.get("name", "Unnamed OSM feature"),
-                "kind": kind,
-                "lat": c["lat"],
-                "lon": c["lon"],
-                "distance_km": round(haversine(lat, lon, c["lat"], c["lon"]), 2),
-                "source": "OpenStreetMap / Overpass API",
-            }
-        )
-    return sort_features_by_distance(feats), True
+    """
+    Real OSM data via Overpass (Stage 3A: delegated to services/osm.py).
+
+    Returns (features, ok) sorted nearest-first, with the Stage 1/2 feature keys plus the
+    new explicit distance-semantics fields. `ok` remains all-or-nothing so a partially
+    failed query still falls back to the labelled synthetic demonstration data instead of
+    presenting partial geography as complete.
+    """
+    return await legacy_overpass_features(lat, lon, radius_km)
+
 
 def classify(count, kind, nearest):
     if kind in ("wetland", "protected") and nearest is not None and nearest < 1:

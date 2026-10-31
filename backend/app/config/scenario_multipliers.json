@@ -1,0 +1,96 @@
+{
+  "schema_version": "3a.1",
+  "data_class": "modelled",
+  "calibrated": false,
+  "label": "Illustrative planning multipliers - NOT calibrated coefficients and NOT scientific forecasts",
+  "provenance": "TerraLex backend/app/config/scenario_multipliers.json (configurable, bounds-validated). No observational calibration, no peer-reviewed source, no site measurements.",
+  "usage_note": "Every value below is an assumption chosen for scenario comparison only. Change it and the label 'modelled' still applies. Multipliers are applied to mapped/user-provided geography and never presented as measurements.",
+  "multiplier_definitions": {
+    "land_take_factor": {
+      "label": "Land take factor",
+      "unit": "dimensionless",
+      "bounds": [0.1, 5.0],
+      "basis": "Planning assumption: how much more/less land the scenario occupies relative to the user footprint.",
+      "data_class": "modelled",
+      "calibrated": false
+    },
+    "water_intensity_factor": {
+      "label": "Water intensity factor",
+      "unit": "dimensionless",
+      "bounds": [0.05, 10.0],
+      "basis": "Planning assumption scaling the user-declared water demand (MLD). Derived here as preset MLD / baseline MLD.",
+      "data_class": "modelled",
+      "calibrated": false
+    },
+    "energy_intensity_factor": {
+      "label": "Energy intensity factor",
+      "unit": "dimensionless",
+      "bounds": [0.05, 10.0],
+      "basis": "Planning assumption scaling the user-declared power demand (MW). Derived here as preset MW / baseline MW.",
+      "data_class": "modelled",
+      "calibrated": false
+    },
+    "site_disturbance_factor": {
+      "label": "Construction disturbance fraction",
+      "unit": "fraction of site area",
+      "bounds": [0.0, 1.0],
+      "basis": "Planning assumption: share of the site area cleared/graded during construction. Not a survey or an EIA figure.",
+      "data_class": "modelled",
+      "calibrated": false
+    },
+    "vegetation_retention_factor": {
+      "label": "Vegetation retention fraction",
+      "unit": "fraction of mapped tree cover",
+      "bounds": [0.0, 1.0],
+      "basis": "Planning assumption: share of mapped tree cover inside the footprint that is retained. Applied to ESA WorldCover tree-cover area when available.",
+      "data_class": "modelled",
+      "calibrated": false
+    },
+    "impervious_surface_factor": {
+      "label": "Impervious surface fraction",
+      "unit": "fraction of site area",
+      "bounds": [0.0, 1.0],
+      "basis": "Planning assumption: share of the site area sealed by buildings, hardstanding and roads. Not a drainage design figure.",
+      "data_class": "modelled",
+      "calibrated": false
+    }
+  },
+  "presets": {
+    "baseline": {
+      "label": "Baseline",
+      "description": "User-declared project, no growth and no mitigation.",
+      "multipliers": {
+        "land_take_factor": 1.0,
+        "water_intensity_factor": 1.0,
+        "energy_intensity_factor": 1.0,
+        "site_disturbance_factor": 0.85,
+        "vegetation_retention_factor": 0.05,
+        "impervious_surface_factor": 0.7
+      }
+    },
+    "high-growth": {
+      "label": "High growth",
+      "description": "Expanded campus with water-cooled plant - the most land-, water- and energy-intensive comparison case.",
+      "multipliers": {
+        "land_take_factor": 1.35,
+        "water_intensity_factor": 3.5,
+        "energy_intensity_factor": 3.0,
+        "site_disturbance_factor": 0.95,
+        "vegetation_retention_factor": 0.0,
+        "impervious_surface_factor": 0.8
+      }
+    },
+    "mitigation": {
+      "label": "Mitigation",
+      "description": "Same campus with hybrid-dry cooling, recycled water and retained vegetation.",
+      "multipliers": {
+        "land_take_factor": 0.9,
+        "water_intensity_factor": 0.4,
+        "energy_intensity_factor": 1.1,
+        "site_disturbance_factor": 0.6,
+        "vegetation_retention_factor": 0.35,
+        "impervious_surface_factor": 0.55
+      }
+    }
+  }
+}
