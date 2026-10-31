@@ -170,9 +170,12 @@ def test_successful_osm_layers_are_cached_and_failed_layers_are_retried(monkeypa
 
     second = asyncio.run(osm.fetch_osm_layers(SITE["lat"], SITE["lon"], 3.0))
     assert second["status"] == "partial"
-    # The layer that worked was reused; the layer that failed was attempted again.
-    assert calls["water"] == 1
-    assert calls["road"] == 2
+    # The layer that worked was reused; the layer that failed was attempted again. A failing
+    # layer now fans out across every configured mirror, so its request count is per-request
+    # x endpoints - the intent (water cached, road retried) is unchanged.
+    endpoints = len(osm.overpass_endpoints())
+    assert calls["water"] == 1, "the successful layer is served from cache, one request ever"
+    assert calls["road"] == 2 * endpoints, "the failed layer is retried once per request, on every mirror"
     assert second["layer_status"]["water"]["cache_hit"] == "memory"
     assert second["layer_status"]["road"]["cache_hit"] is None
     assert len(second["features"]) == len(first["features"])
@@ -255,7 +258,8 @@ def test_partial_osm_does_not_poison_the_landscape_cache(monkeypatch):
     assert second["cache"]["hit"] is None, "a partial base layer must not be cached as a whole"
     assert landcover_calls["reads"] == 1, "the successful land-cover read must be reused"
     assert dem_calls["batches"] == 1, "the successful DEM grid must be reused"
-    assert calls["water"] == 1 and calls["road"] == 2
+    # road fails over across every mirror; water is cached after its first success.
+    assert calls["water"] == 1 and calls["road"] == 2 * len(osm.overpass_endpoints())
 
 
 # ---------------------------------------------------------------------------
