@@ -35,6 +35,13 @@ ATTRIBUTION_TEXT = (
     "funded by the European Union; DOI: 10.5270/ESA-c5d3d65)"
 )
 
+# Cache namespace version. Bumped `dem:v1` -> `dem:v2` when the payload gained
+# `data_class` / `surface_model` (Copernicus GLO-90 is `observation_derived`, NOT
+# `measured`). Entries written under the old namespace are unreachable, so a payload
+# carrying the withdrawn classification can never be served again.
+DEM_CACHE_NAMESPACE = "dem:v2"
+DEM_DATA_CLASS = "observation_derived"
+
 _MEM_CACHE: OrderedDict[str, dict] = OrderedDict()
 _INFLIGHT_LOCKS: dict[str, asyncio.Lock] = {}
 _INFLIGHT_COUNTS: dict[str, int] = {}
@@ -75,7 +82,10 @@ def make_elevation_cache_key(
 ) -> str:
     n = normalize_grid_size(grid_size)
     r_km = sanitize_radius_km(radius_km)
-    return f"dem:v1:{round(float(lat), 4):.4f}:{round(float(lon), 4):.4f}:{round(r_km, 2):.2f}:{n}"
+    return (
+        f"{DEM_CACHE_NAMESPACE}:{round(float(lat), 4):.4f}:"
+        f"{round(float(lon), 4):.4f}:{round(r_km, 2):.2f}:{n}"
+    )
 
 
 def generate_enu_elevation_grid_coords(
@@ -197,9 +207,25 @@ def unavailable_elevation_payload(
     }
 
 
+def _payload_provenance_is_current(payload: dict) -> bool:
+    """
+    Rejects cached DEM payloads written before the provenance correction.
+
+    Those rows classified the Copernicus DEM as `measured` and carry no `data_class` or
+    `surface_model`. Serving one would republish the withdrawn classification, so a stale
+    payload is treated as a cache miss (and re-fetched) instead.
+    """
+    if payload.get("status") != "ok":
+        return True
+    return payload.get("data_class") == DEM_DATA_CLASS and bool(payload.get("surface_model"))
+
+
 def _mem_cache_get(key: str) -> dict | None:
     item = _MEM_CACHE.get(key)
     if item is None:
+        return None
+    if not _payload_provenance_is_current(item):
+        _MEM_CACHE.pop(key, None)
         return None
     _MEM_CACHE.move_to_end(key)
     copy_item = dict(item)
@@ -223,6 +249,8 @@ def _sqlite_cache_get(key: str) -> dict | None:
             return None
         parsed = json.loads(row[0])
         if isinstance(parsed, dict) and parsed.get("status") == "ok":
+            if not _payload_provenance_is_current(parsed):
+                return None
             _mem_cache_put(key, parsed)
             out = dict(parsed)
             out["cache_hit"] = "sqlite"
@@ -373,7 +401,7 @@ async def get_elevation_grid(
                 "center_m": center_m,
                 "relief_m": relief_m,
                 "resolution_m": 90,
-                "data_class": "observation_derived",
+                "data_class": DEM_DATA_CLASS,
                 "surface_model": (
                     "Digital Surface Model (DSM): elevations include buildings, structures and "
                     "vegetation canopy. This is NOT bare-earth terrain (DTM)."

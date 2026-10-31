@@ -42,6 +42,10 @@ export interface ElevationGridPayload {
   attribution?: string | null;
   cache_hit?: string | null;
   data_label?: string;
+  /** Provenance class from the backend registry, e.g. `observation_derived` (never `measured`). */
+  data_class?: string | null;
+  /** Copernicus GLO-90 is a Digital Surface Model; null when elevation is unavailable. */
+  surface_model?: string | null;
 }
 
 export interface TerrainVerticalParams {
@@ -208,7 +212,7 @@ export function computeTerrainVerticalParams(
 }
 
 /**
- * Hypsometric RGB [0..1] color ramp for measured DEM terrain vertices.
+ * Hypsometric RGB [0..1] color ramp for real (observed-derived) DEM terrain vertices.
  */
 export function elevationColorRgb(
   elevM: number,
@@ -252,7 +256,7 @@ export function latLonToEnuKm(
 
 /**
  * Returns local Three.js scene height Y at world (x, z):
- * - Measured DEM (status === 'ok'): bilinearly interpolated height relative to site center_m,
+ * - Real DEM (status === 'ok'): bilinearly interpolated height relative to site center_m,
  *   scaled by unitsPerMeter * verticalExaggeration (so (0, 0) sits at y = 0).
  * - Missing / unavailable DEM: explicit flat reference plane at y = 0 (never fake hills).
  */

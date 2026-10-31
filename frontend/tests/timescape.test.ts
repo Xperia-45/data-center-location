@@ -343,7 +343,11 @@ test('Stage 2: client localStorage cache restores verified DEM only for matching
       [248, 250],
       [246, 247],
     ],
-    data_label: 'Measured DEM terrain',
+    // Current provenance fields: a stored payload without them is treated as pre-correction
+    // and must never be restored (see tests/elevationCache.test.ts).
+    data_class: 'observation_derived',
+    surface_model: 'Digital Surface Model (DSM): includes canopy and structures; NOT bare-earth DTM.',
+    data_label: 'Observed-derived DEM terrain',
   };
   const failedDem: ElevationGridPayload = { status: 'unavailable', reason: 'rate_limited', grid_size: 2, values_m: null };
 
@@ -542,7 +546,10 @@ test('Integration: Timescape component renders AMSL metadata, attribution, fallb
         showLegal: true,
       })
     );
-    assert.ok(html.includes('Measured DEM Terrain'));
+    assert.ok(html.includes('Observed-derived DEM Terrain (DSM)'));
+    assert.ok(!html.includes('Measured DEM Terrain'), 'the withdrawn label must not be rendered');
+    assert.ok(html.includes('observation_derived'), 'the provenance class is disclosed in the UI');
+    assert.ok(html.includes('digital surface model'));
     assert.ok(html.includes('m AMSL'));
     assert.ok(html.includes('20×20'));
     assert.ok(html.includes('2.5×'));
