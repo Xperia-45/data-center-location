@@ -20,7 +20,7 @@ Tests/build: `cd backend && ../.venv/bin/python -m pytest -q` · `npm --prefix f
 2. **Environmental Assessment** → findings per category with risk, evidence (real OSM features + distances), source, quality, confidence. Climate hazards shown **UNAVAILABLE** (not fabricated).
 3. **Legal Intelligence** → database-driven results: law, section, original (abridged, source-linked) text, plain-language explanation, why it applies, required approval, authority, status (`APPROVAL REQUIRED` / `HIGH LEGAL EXPOSURE` / `UNKNOWN` — never "compliant" by default), consequences, verified date. Search the legal DB live.
 4. **Scenario Simulation** → Baseline / High-Growth / Mitigation presets (labelled *Modelled*).
-5. **Environmental Timescape** → Three.js interactive 3D (orbit/zoom/pan/reset): Present/Development/Future × scenarios, same analysis features as map, legal overlay rings, mitigation trees/solar. Terrain is **labelled synthetic**.
+5. **Environmental Timescape** → Three.js interactive 3D (orbit/zoom/pan/reset): Present/Development/Future × scenarios, ENU latitude-corrected projection scaled to `radius_km`, real **Copernicus DEM GLO-90 (~90 m) elevation via Open-Meteo** (configurable `N×N` grid, default `20×20` split into `≤100`-point batches, reporting site AMSL elevation, range, vertical exaggeration, and attribution; degrades to a **visually & textually distinct flat `0 m` reference grid** if elevation data is unavailable).
 6. **Site Comparison** → save ≥2 sites; transparent inputs table, no arbitrary weighted "best site" score.
 7. **Data Sources** → provenance for every dataset.
 
@@ -28,7 +28,8 @@ Tests/build: `cd backend && ../.venv/bin/python -m pytest -q` · `npm --prefix f
 ```
 frontend/  React+TS+Tailwind, MapLibre (OSM raster), Three.js Timescape, typed API client (src/lib/api.ts)
 backend/   FastAPI + Pydantic (app/main.py routes, app/schemas.py validation)
-  app/services/environment.py  Live Overpass/OSM queries → findings; labelled synthetic fallback if OSM unreachable
+  app/services/elevation.py    Configurable ENU DEM grid (default 20x20, <=100-pt batches) via Open-Meteo + memory/SQLite cache
+  app/services/environment.py  Live Overpass/OSM queries + concurrent DEM fetch → findings; labelled synthetic fallback if OSM unreachable
   app/services/legal.py        Applicability engine: findings+project triggers → DB query (no laws in code/UI beyond trigger keys)
   app/services/scenarios.py    Preset simulation (modelled, labelled)
   app/legal_seed.json          Curated legal DB seed (the ONLY place legal content lives)
@@ -49,15 +50,17 @@ Environment (Protection) Act 1986 (ss.5, 15-as-amended) · Water Act 1974 (s.25/
 | Base map, water/forest/wetland/settlement features & distances | **Real** — OpenStreetMap via Overpass (live) |
 | Legal provisions | **Imported official-source** curated seed (abridged excerpts) |
 | Fallback features if Overpass unreachable | **Synthetic, explicitly labelled** in API + UI |
-| Terrain mesh in Timescape | **Synthetic illustrative, labelled** |
+| Terrain mesh in Timescape | **Real measured DEM** — Copernicus DEM GLO-90 (~90 m) via Open-Meteo (CC BY 4.0 non-commercial, ESA DOI `10.5270/ESA-c5d3d65`); degrades to an **explicitly labelled flat `0 m` fallback reference grid** if unavailable |
 | Scenarios | **Modelled, labelled** — not measurements |
 | Flood/heat/water-stress (WRI Aqueduct/IMD) | **Not integrated — shown UNAVAILABLE** |
 
 ## API
-`GET /api/v1/health` · `POST/GET /api/v1/sites` · `GET /api/v1/sites/{id}` · `POST /api/v1/sites/{id}/analyze` · `GET /api/v1/sites/{id}/environment` · `POST /api/v1/sites/{id}/scenarios` · `GET /api/v1/sites/{id}/legal` · `GET /api/v1/legal/legislation[/{id}]` · `GET /api/v1/legal/provisions/{id}` · `POST /api/v1/legal/search` · `GET /api/v1/legal/import/template` · `GET /api/v1/data-sources` · OpenAPI at `/api/docs`.
+`GET /api/v1/health` · `POST/GET /api/v1/sites` · `GET /api/v1/sites/{id}` · `POST /api/v1/sites/{id}/analyze` · `GET /api/v1/sites/{id}/environment` · `GET /api/v1/elevation` · `POST /api/v1/sites/{id}/scenarios` · `GET /api/v1/sites/{id}/legal` · `GET /api/v1/legal/legislation[/{id}]` · `GET /api/v1/legal/provisions/{id}` · `POST /api/v1/legal/search` · `GET /api/v1/legal/import/template` · `GET /api/v1/data-sources` · OpenAPI at `/api/docs`.
 
-## Known limitations
-SQLite demo store (compose provides PostGIS; spatial queries currently Haversine in Python); OSM is crowd-sourced (verify on ground); legal DB is a small verified seed, not exhaustive; no auth; large JS bundle (code-splitting TODO); geocoding search is via map-click/presets/manual coords. Secrets via env vars only; coordinates validated server-side (Pydantic).
+## Known limitations & Render persistence note
+- **Render ephemeral SQLite storage:** Without a mounted Render Persistent Disk, container-local `/srv/platform.db` resets on redeploy or idle spin-down (`GET /api/v1/health` reports `storage.mode = "ephemeral_default"`). To keep Open-Meteo usage controlled without relying solely on container disk: (1) backend uses a bounded in-memory LRU cache + single-flight request deduplication + best-effort SQLite `elevation_cache`, (2) `GET /api/v1/elevation` sets `Cache-Control: public, max-age=604800`, and (3) the frontend persists verified DEM grids in a bounded `localStorage` cache (`terralex:elevation_cache:v1`). For server-side persistence across restarts on Render, mount a Persistent Disk and set `DATABASE_URL_SQLITE=/var/data/platform.db`, or migrate to PostgreSQL/PostGIS (`docker-compose.yml`).
+- **Open-Meteo usage terms:** Free API (`https://api.open-meteo.com/v1/elevation`) is strictly for **non-commercial use** (`<10,000` calls/day, `<5,000`/hr, `<600`/min, CC BY 4.0) with mandatory Open-Meteo + Copernicus DEM (`DOI: 10.5270/ESA-c5d3d65`) attribution; configure `OPEN_METEO_ELEVATION_URL` + `OPEN_METEO_API_KEY` for commercial plans or self-hosted Open-Meteo.
+- SQLite demo store (compose provides PostGIS; spatial queries currently Haversine in Python); OSM is crowd-sourced (verify on ground); legal DB is a small verified seed, not exhaustive; no auth; large JS bundle (code-splitting TODO); geocoding search is via map-click/presets/manual coords. Secrets via env vars only; coordinates validated server-side (Pydantic).
 
 ## Screenshots
 Run locally and capture: Overview dashboard, Site Intelligence map, Legal Intelligence card, Timescape (Present→Development, Mitigation). (Live preview is provided in the Arena session.)
