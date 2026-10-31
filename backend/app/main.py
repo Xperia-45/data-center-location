@@ -376,7 +376,12 @@ def parcel_validate(inp: ParcelValidateIn):
 
 @app.get("/api/v1/datasets")
 def datasets():
-    """Dataset provenance + availability registry (measured / mapped / estimated / modelled)."""
+    """Dataset provenance + availability registry.
+
+    Every dataset is published with a `data_class` (measured / observation_derived / mapped /
+    estimated / modelled / user_input / unavailable) and its definition, so a client can see
+    exactly how much of each number is observed and how much is derived.
+    """
     return dataset_registry_payload()
 
 

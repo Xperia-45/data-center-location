@@ -46,7 +46,7 @@ def record(check: str, ok: bool, detail: str) -> None:
 
 
 async def check_open_meteo() -> None:
-    print("\n== Copernicus DEM GLO-90 via Open-Meteo (measured elevation) ==")
+    print("\n== Copernicus DEM GLO-90 via Open-Meteo (observation-derived elevation) ==")
     for name, (lat, lon) in SITES.items():
         grid = await get_elevation_grid(lat, lon, RADIUS_KM, grid_size=8)
         if grid["status"] == "ok":

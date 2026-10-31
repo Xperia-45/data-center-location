@@ -239,7 +239,13 @@ def test_legacy_shim_keeps_the_stage12_contract(monkeypatch):
         assert {"name", "kind", "lat", "lon", "distance_km", "source"} <= set(f)
         assert f["kind"] in {"water", "wetland", "forest", "protected", "settlement"}
     assert [f["distance_km"] for f in feats] == sorted(f["distance_km"] for f in feats)
-    # A partially failed legacy query must still degrade all-or-nothing.
+
+    # A previously successful layer is legitimately reused from the per-layer cache...
     install_fake_overpass(monkeypatch, fail_layers={"settlement"})
+    feats_cached, ok_cached = asyncio.run(osm.legacy_overpass_features(SITE_LAT, SITE_LON, 5.0))
+    assert ok_cached is True and feats_cached == feats
+
+    # ...but a genuinely failing query must still degrade all-or-nothing.
+    osm.clear_osm_cache()
     feats2, ok2 = asyncio.run(osm.legacy_overpass_features(SITE_LAT, SITE_LON, 5.0))
     assert ok2 is False and feats2 == []

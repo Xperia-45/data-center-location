@@ -10,7 +10,7 @@ One entry point that assembles the two layers TerraLex keeps strictly apart:
   development_impact_layer  scenario arithmetic only. This is the only layer that may
                             change between time periods or scenarios.
 
-Both layers carry an explicit `data_class` per number (measured / mapped / estimated /
+Both layers carry an explicit `data_class` per number (observation_derived / mapped / estimated /
 modelled / user_input / unavailable) and the base layer carries a fingerprint plus a
 content digest so a client can *prove* the geography did not move between scenarios.
 
@@ -36,8 +36,8 @@ from .datasets import (
 from .elevation import get_elevation_grid, normalize_grid_size
 from .landcover import dataset_metadata as worldcover_metadata
 from .landcover import landcover_summary
-from .osm import DEFAULT_LAYERS, fetch_osm_layers, resolve_layers
-from .parcels import ParcelValidationError, validate_parcel
+from .osm import DEFAULT_LAYERS, clear_osm_cache, fetch_osm_layers, resolve_layers
+from .parcels import ParcelValidationError, parcel_digest, validate_parcel
 from .scenario_multipliers import build_impact_layer
 
 LAYER_CHOICES = ("dem", "osm", "landcover")
@@ -52,13 +52,18 @@ LAYER_MODEL_NOTE = (
 DEFAULT_PROJECT = {"footprint_ha": 10.0, "water_mld": 1.0, "power_mw": 20.0, "source": "platform defaults"}
 
 _cache = NamespacedCache("landscape:v1", table="landscape_cache", max_entries=64)
+# Independent land-cover tier: a raster read that succeeded must not be repeated just
+# because a different layer (e.g. one OSM query) failed on the same request.
+_landcover_cache = NamespacedCache("landcover:v1", table="landscape_cache", max_entries=64)
 
 _VOLATILE_KEYS = {"cache_hit", "retrieved_at", "generated_at", "cache", "detail"}
 
 
 def clear_landscape_cache() -> None:
-    """Test/diagnostic helper."""
+    """Test/diagnostic helper: clears the assembled-layer, land-cover and OSM layer caches."""
     _cache.clear()
+    _landcover_cache.clear()
+    clear_osm_cache()
 
 
 def resolve_request_layers(layers: list[str] | tuple[str, ...] | None) -> list[str]:
@@ -140,19 +145,38 @@ async def assemble_base_layer(
     include_geometry: bool,
     osm_layers: list[str],
     parcel_geojson: dict | None,
+    use_cache: bool = True,
 ) -> dict:
     """Fetches the geographic base layer concurrently, one task per dataset."""
+
+    async def _landcover() -> dict:
+        key = _landcover_cache.key(
+            lat=f"{round(float(lat), 4):.4f}",
+            lon=f"{round(float(lon), 4):.4f}",
+            radius=f"{round(float(radius_km), 2):.2f}",
+            parcel=parcel_digest(parcel_geojson) if parcel_geojson else "none",
+            dataset=worldcover_metadata()["dataset_version"],
+        )
+        if not use_cache:
+            payload = await landcover_summary(lat, lon, radius_km, parcel_geojson=parcel_geojson)
+            payload["cache_hit"] = None
+            return payload
+        return await _landcover_cache.get_or_fetch(
+            key, lambda: landcover_summary(lat, lon, radius_km, parcel_geojson=parcel_geojson)
+        )
+
     tasks: dict[str, asyncio.Task] = {}
     if "dem" in layers:
         tasks["terrain"] = asyncio.ensure_future(get_elevation_grid(lat, lon, radius_km, grid_size=grid_size))
     if "osm" in layers:
         tasks["osm"] = asyncio.ensure_future(
-            fetch_osm_layers(lat, lon, radius_km, layers=osm_layers, include_geometry=include_geometry)
+            fetch_osm_layers(
+                lat, lon, radius_km, layers=osm_layers,
+                include_geometry=include_geometry, use_cache=use_cache,
+            )
         )
     if "landcover" in layers:
-        tasks["land_cover"] = asyncio.ensure_future(
-            landcover_summary(lat, lon, radius_km, parcel_geojson=parcel_geojson)
-        )
+        tasks["land_cover"] = asyncio.ensure_future(_landcover())
 
     results = await asyncio.gather(*tasks.values(), return_exceptions=True)
     resolved: dict[str, dict] = {}
@@ -177,7 +201,7 @@ async def assemble_base_layer(
             "canopy. This is NOT bare-earth terrain (DTM)."
         )
         # An unavailable DEM is not measured data; label it as what it is.
-        terrain["data_class"] = "measured" if terrain.get("status") == "ok" else "unavailable"
+        terrain["data_class"] = "observation_derived" if terrain.get("status") == "ok" else "unavailable"
         if terrain.get("status") == "ok":
             terrain.setdefault("resolution_note", (
                 f"Native DEM resolution is ~90 m. The {terrain.get('grid_size')}x{terrain.get('grid_size')} "
@@ -253,11 +277,15 @@ async def get_landscape(
         include_geometry=include_geometry, osm_layers=resolved_osm_layers, parcel=parcel,
     )
 
+    # Use the VALIDATED (and, if needed, repaired) parcel geometry - never the raw input -
+    # so land cover is masked by exactly the geometry the parcel report describes.
+    effective_parcel = parcel["geometry"] if parcel is not None else None
+
     async def _build() -> dict:
         return await assemble_base_layer(
             lat=lat, lon=lon, radius_km=radius_km, grid_size=n, layers=wanted,
             include_geometry=include_geometry, osm_layers=resolved_osm_layers,
-            parcel_geojson=parcel_geojson if parcel is not None else None,
+            parcel_geojson=effective_parcel, use_cache=use_cache,
         )
 
     if use_cache:
@@ -311,6 +339,13 @@ async def get_landscape(
         for name in ("terrain", "osm", "land_cover")
         if name in base
     )
+    coverage_warnings = [
+        warning
+        for warning in (
+            (base.get("osm") or {}).get("partial_coverage_warning"),
+        )
+        if warning
+    ]
 
     return {
         "schema_version": SCHEMA_VERSION,
@@ -339,6 +374,7 @@ async def get_landscape(
         },
         "cache": {"key": key, "hit": base.get("cache_hit"), "cacheable": base.get("cacheable", False)},
         "all_layers_ok": layers_ok,
+        "coverage_warnings": coverage_warnings,
         "generated_at": datetime.datetime.utcnow().isoformat() + "Z",
         "disclaimer": (
             "Screening tool only. Base geography is mapped/measured data with stated limitations; "

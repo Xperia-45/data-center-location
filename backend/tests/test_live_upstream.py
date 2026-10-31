@@ -30,7 +30,7 @@ c = TestClient(app)
 LUDHIANA = {"lat": 30.901, "lon": 75.8573, "radius_km": 5.0}
 
 
-def test_live_copernicus_dem_returns_measured_elevation():
+def test_live_copernicus_dem_returns_observation_derived_elevation():
     grid = asyncio.run(get_elevation_grid(LUDHIANA["lat"], LUDHIANA["lon"], LUDHIANA["radius_km"], grid_size=8))
     assert grid["status"] == "ok", grid
     assert grid["resolution_m"] == 90

@@ -119,7 +119,7 @@ def test_landscape_separates_geography_from_scenario(stub_upstream):
     assert body["integrity"]["data_class_definitions"]["measured"]
     assert body["all_layers_ok"] is True
     assert "Digital Surface Model" in base["terrain"]["surface_model"]
-    assert base["terrain"]["data_class"] == "measured"
+    assert base["terrain"]["data_class"] == "observation_derived"
     assert base["osm"]["data_class"] == "mapped"
 
 

@@ -5,7 +5,8 @@ Single source of truth for *what* data TerraLex uses, *where* it comes from,
 *what kind of evidence* it is, and *whether it is currently available*.
 
 Integrity rules encoded here (never restate a class more strongly than the data is):
-  measured  - physical observation (e.g. interferometric SAR elevation)
+  measured            - direct instrument observation at the reported location (gauge/survey)
+  observation_derived - instrument observations processed into a gridded product (DEM/DSM)
   mapped    - classified / digitised representation of reality (OSM, ESA WorldCover)
   estimated - derived arithmetic from mapped/measured inputs (areas, counts, fractions)
   modelled  - assumption-driven scenario output; never a forecast
@@ -20,7 +21,8 @@ import datetime
 SCHEMA_VERSION = "3a.1"
 
 DATA_CLASS_DEFINITIONS: dict[str, str] = {
-    "measured": "Direct physical observation by an instrument (e.g. radar-derived elevation). Still carries sensor error and a native resolution limit.",
+    "measured": "Direct physical observation by an instrument at the reported location (e.g. a gauge or survey reading). TerraLex currently serves no dataset in this class.",
+    "observation_derived": "Computed from instrument observations through a processing chain (e.g. interferometric SAR -> a gridded digital surface model). The input is a measurement, but each delivered pixel is a processed, resampled surface value: it is not a point measurement at your site, and it carries both sensor error and a native resolution limit.",
     "mapped": "Digitised or classified representation of the world (crowd-sourced vectors, satellite classification). Correctness depends on the mapper/classifier, not on a measurement at your site.",
     "estimated": "Arithmetic derived from mapped/measured inputs (pixel counts x pixel area, feature counts, distances). Precision is inherited from the input, never improved by the calculation.",
     "modelled": "Assumption-driven scenario arithmetic. Illustrative only - not a calibrated model, not a scientific forecast.",
@@ -31,6 +33,7 @@ DATA_CLASS_DEFINITIONS: dict[str, str] = {
 INTEGRITY_RULES: list[str] = [
     "Copernicus DEM GLO-90 is a Digital Surface Model (DSM): elevations include buildings, structures and vegetation canopy. It is NOT bare-earth terrain (DTM).",
     "Interpolating or re-gridding a DEM does not increase its native resolution. A 20x20 sample grid of a ~90 m DEM is still ~90 m data.",
+    "Copernicus DEM GLO-90 is classified `observation_derived`, not `measured`: it is a processed radar-derived grid, not a survey or gauge reading at the site.",
     "ESA WorldCover is a classified map (76.7% overall accuracy for 2021 v200), not a ground survey. Class areas are estimates from pixel counts.",
     "OpenStreetMap is crowd-sourced and unevenly mapped. Absence of a feature is not evidence that the feature does not exist.",
     "Distances to mapped linear features (roads, rivers) depend on the distance basis: geometry minimum distance vs. mapped centroid are different quantities and are labelled per feature.",
@@ -50,7 +53,12 @@ DATASETS: list[dict] = [
         "provider": "ESA / DLR e.V. / Airbus Defence and Space, served by Open-Meteo Elevation API",
         "layer": "geographic_base",
         "dataset_version": "2021 release, GLO-90",
-        "data_class": "measured",
+        "data_class": "observation_derived",
+        "data_class_note": (
+            "Derived from radar observations (Copernicus DEM / TanDEM-X interferometry) and delivered "
+            "as a resampled grid, so it is classified `observation_derived`, not `measured`. It is a "
+            "Digital Surface Model, not a point survey of the site."
+        ),
         "surface_model": "Digital Surface Model (DSM) - includes buildings, structures and vegetation canopy; NOT bare-earth DTM",
         "native_resolution_m": 90,
         "crs": "EPSG:4326 samples, returned as a local East-North-Up grid",
@@ -333,7 +341,7 @@ _LEGACY_VIEW: dict[str, dict] = {
     "copernicus_dem_glo90": {
         "provider": "Open-Meteo Elevation API / Copernicus DEM",
         "dataset": "Copernicus DEM 2021 release GLO-90 (90m Digital Surface Model, DOI: 10.5270/ESA-c5d3d65)",
-        "quality": "Measured global DEM (~90m) - DSM, not bare-earth DTM",
+        "quality": "Observed-derived global DEM (~90 m, radar interferometry) - DSM, not bare-earth DTM",
     },
     "openstreetmap_overpass": {
         "provider": "OpenStreetMap / Overpass API",

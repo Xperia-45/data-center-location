@@ -40,7 +40,8 @@ def test_datasets_registry_endpoint_reports_every_dataset():
     ids = {d["id"] for d in body["datasets"]}
     assert REQUIRED_IDS <= ids
     assert set(body["data_class_definitions"]) == {
-        "measured", "mapped", "estimated", "modelled", "user_input", "unavailable",
+        "measured", "observation_derived", "mapped", "estimated", "modelled",
+        "user_input", "unavailable",
     }
     assert body["not_modelled_effects"]
     assert all(e["status"] == "NOT MODELLED" for e in body["not_modelled_effects"])
@@ -48,7 +49,7 @@ def test_datasets_registry_endpoint_reports_every_dataset():
 
 def test_copernicus_dem_is_labelled_as_a_surface_model_not_bare_earth():
     dem = next(d for d in DATASETS if d["id"] == "copernicus_dem_glo90")
-    assert dem["data_class"] == "measured"
+    assert dem["data_class"] == "observation_derived"
     assert dem["native_resolution_m"] == 90
     assert "Digital Surface Model" in dem["surface_model"]
     assert "NOT bare-earth" in dem["surface_model"]

@@ -23,6 +23,7 @@ from typing import Any
 
 import httpx
 
+from .cache import NamespacedCache
 from .geo import decimate, enu_km, haversine_km
 
 OVERPASS_URL = os.getenv("OVERPASS_URL", "https://overpass-api.de/api/interpreter")
@@ -116,6 +117,27 @@ DISTANCE_BASIS_NOTES: dict[str, str] = {
 }
 
 _TAG_KEEP = ("name", "natural", "water", "waterway", "landuse", "leisure", "boundary", "place", "highway", "intermittent", "seasonal")
+
+
+# Per-layer cache. A single successful layer is cached on its own so that one failing
+# layer can neither discard the good results nor force them to be re-fetched. Failed
+# layers are never written to any tier.
+_layer_cache = NamespacedCache("osm:v1", table="landscape_cache", max_entries=256)
+
+
+def clear_osm_cache() -> None:
+    """Test/diagnostic helper."""
+    _layer_cache.clear()
+
+
+def layer_cache_key(layer_id: str, lat: float, lon: float, radius_km: float, include_geometry: bool) -> str:
+    return _layer_cache.key(
+        layer=layer_id,
+        lat=f"{round(float(lat), 4):.4f}",
+        lon=f"{round(float(lon), 4):.4f}",
+        radius=f"{round(float(radius_km), 2):.2f}",
+        geom=int(bool(include_geometry)),
+    )
 
 
 def resolve_layers(layers: list[str] | tuple[str, ...] | None) -> list[str]:
@@ -306,6 +328,8 @@ async def fetch_layer(
         "source": "OpenStreetMap contributors via Overpass API",
         "query": query,
         "features": [],
+        # Every failure path inherits this: a failed layer is never cached.
+        "cacheable": False,
     }
     owns_client = client is None
     try:
@@ -345,6 +369,7 @@ async def fetch_layer(
     return {
         **base,
         "status": "ok",
+        "cacheable": True,
         "reason": None,
         "detail": (
             f"{len(features)} mapped feature(s) returned"
@@ -362,13 +387,31 @@ async def fetch_osm_layers(
     radius_km: float,
     layers: list[str] | tuple[str, ...] | None = None,
     include_geometry: bool = False,
+    use_cache: bool = True,
 ) -> dict:
-    """Fetch all requested layers concurrently with per-layer isolation."""
+    """
+    Fetch all requested layers concurrently with per-layer isolation.
+
+    Each layer is cached independently under its own site/resolution-scoped key. Only
+    layers with `status == "ok"` are written to the cache, so after a partial result the
+    layers that worked are reused while the failed ones are retried.
+    """
     wanted = resolve_layers(layers)
-    async with httpx.AsyncClient(timeout=OVERPASS_TIMEOUT_SEC, headers={"User-Agent": USER_AGENT}) as client:
-        results = await asyncio.gather(
-            *(fetch_layer(lid, lat, lon, radius_km, include_geometry, client=client) for lid in wanted)
+
+    async def _one(layer_id: str, client: httpx.AsyncClient) -> dict:
+        async def _factory() -> dict:
+            return await fetch_layer(layer_id, lat, lon, radius_km, include_geometry, client=client)
+
+        if not use_cache:
+            result = await _factory()
+            result["cache_hit"] = None
+            return result
+        return await _layer_cache.get_or_fetch(
+            layer_cache_key(layer_id, lat, lon, radius_km, include_geometry), _factory
         )
+
+    async with httpx.AsyncClient(timeout=OVERPASS_TIMEOUT_SEC, headers={"User-Agent": USER_AGENT}) as client:
+        results = await asyncio.gather(*(_one(lid, client) for lid in wanted))
     per_layer = {r["layer"]: r for r in results}
     ok_layers = [r for r in results if r["status"] == "ok"]
     features = sort_features_by_distance([f for r in ok_layers for f in r["features"]])
@@ -380,10 +423,21 @@ async def fetch_osm_layers(
         status = "partial"
         failed = [r["layer"] for r in results if r["status"] != "ok"]
         detail = f"{len(ok_layers)}/{len(results)} layers retrieved; failed: {', '.join(failed)}."
+    partial_coverage_warning = (
+        None
+        if status == "ok"
+        else (
+            f"PARTIAL COVERAGE: only {len(ok_layers)}/{len(results)} OSM layers were retrieved. "
+            "This is NOT complete geography for the site - absence of a feature in the missing "
+            "layers says nothing about the ground."
+        )
+    )
     failed_reasons = sorted({
         str(r.get("reason")) for r in results if r["status"] != "ok" and r.get("reason")
     })
     return {
+        "cacheable": status == "ok",
+        "partial_coverage_warning": partial_coverage_warning,
         "status": status,
         "reason": None if status == "ok" else ("all_layers_failed:" + ",".join(failed_reasons) if failed_reasons else "unknown"),
         "detail": detail,
@@ -394,12 +448,28 @@ async def fetch_osm_layers(
         "retrieved_at": datetime.datetime.utcnow().isoformat() + "Z",
         "include_geometry": bool(include_geometry),
         "radius_km": round(float(radius_km), 3),
-        "layer_status": {lid: {"status": per_layer[lid]["status"], "detail": per_layer[lid]["detail"]} for lid in wanted},
+        "layer_status": {
+            lid: {
+                "status": per_layer[lid]["status"],
+                "detail": per_layer[lid]["detail"],
+                "cache_hit": per_layer[lid].get("cache_hit"),
+                "cacheable": per_layer[lid].get("cacheable", False),
+            }
+            for lid in wanted
+        },
         "layers": {lid: per_layer[lid] for lid in wanted},
         "features": features,
         "data_label": (
-            "Mapped geography (OpenStreetMap, crowd-sourced) - absence of a mapped feature is not evidence of absence"
-            if ok_layers else "UNAVAILABLE (Overpass unreachable) - no geography inferred, nothing fabricated"
+            "UNAVAILABLE (Overpass unreachable) - no geography inferred, nothing fabricated"
+            if not ok_layers
+            else (
+                "PARTIAL mapped geography (OpenStreetMap, crowd-sourced) - "
+                f"only {len(ok_layers)}/{len(results)} layers retrieved, so this is NOT complete "
+                "coverage of the site"
+                if status == "partial"
+                else "Mapped geography (OpenStreetMap, crowd-sourced) - absence of a mapped feature "
+                     "is not evidence of absence"
+            )
         ),
     }
 
