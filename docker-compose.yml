@@ -1,0 +1,17 @@
+services:
+  db:
+    image: postgis/postgis:16-3.4
+    environment: {POSTGRES_DB: envintel, POSTGRES_USER: envintel, POSTGRES_PASSWORD: ${DB_PASSWORD:-changeme-local}}
+    ports: ["5432:5432"]
+    volumes: [pgdata:/var/lib/postgresql/data]
+  backend:
+    build: ./backend
+    environment: {DATABASE_URL_SQLITE: /data/platform.db}
+    volumes: [backend_data:/data]
+    ports: ["8000:8000"]
+    depends_on: [db]
+  frontend:
+    build: ./frontend
+    ports: ["5173:5173"]
+    depends_on: [backend]
+volumes: {pgdata: {}, backend_data: {}}
