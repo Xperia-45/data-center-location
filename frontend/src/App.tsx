@@ -8,7 +8,7 @@ import {
   contoursFromGrid,
   elevationTintCells,
   footprintEnvelope,
-  summarizeSheet,
+  notModelledEffects, summarizeSheet,
 } from './lib/cartography';
 import { SITE_PRESETS, PresetKey, isValidElevationGrid } from './lib/timescapeMath';
 import { syncElevationWithClientCache } from './lib/elevationCache';
@@ -97,6 +97,9 @@ export default function App() {
   const [err, setErr] = useState('');
   const [laws, setLaws] = useState<any[]>([]);
   const [sources, setSources] = useState<any[]>([]);
+  // Effects the backend explicitly declares NOT MODELLED. Surfaced so their absence from
+  // the analysis cannot be mistaken for a finding of no impact.
+  const [notModelled, setNotModelled] = useState<any[]>([]);
   const [legalQuery, setLegalQuery] = useState('');
   const [searchResults, setSearchResults] = useState<any[]>([]);
   // Stage 3A geographic base layer for the topographic sheet. Fetched once per site+radius and
@@ -116,6 +119,7 @@ export default function App() {
     refresh();
     api.legislation().then(setLaws).catch(() => {});
     api.sources().then(setSources).catch(() => {});
+    api.datasets().then((d: any) => setNotModelled(notModelledEffects(d))).catch(() => {});
   }, []);
 
   function updateForm(patch: Partial<Site>) {
@@ -858,6 +862,26 @@ export default function App() {
                 Verified real data / Imported official data / Third-party data / Synthetic demonstration / Modelled scenario are labelled in-line. Missing data is shown as UNAVAILABLE — never fabricated.
               </p>
             </div>
+            {notModelled.length > 0 ? (
+              <div className="card text-sm">
+                <h3 className="font-bold">Not modelled by this analysis</h3>
+                <p className="opacity-80">
+                  The connected datasets and models do not cover these effects. Their absence from the
+                  findings above is not a finding of no impact.
+                </p>
+                <ul className="mt-2 space-y-1.5">
+                  {notModelled.map((e) => (
+                    <li key={e.id}>
+                      <span className="font-semibold">{e.effect}</span>
+                      <span className="ml-1.5 rounded bg-amber-500/20 px-1.5 py-0.5 text-xs text-amber-200">
+                        {e.status}
+                      </span>
+                      {e.reason ? <div className="opacity-70">{e.reason}</div> : null}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
           </section>
         )}
       </main>

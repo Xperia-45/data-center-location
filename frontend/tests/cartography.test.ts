@@ -30,6 +30,7 @@ import {
   layerAvailability,
   metersPerPixel,
   niceScaleBarMeters,
+  notModelledEffects,
   summarizeSheet,
 } from '../src/lib/cartography.ts';
 
@@ -433,4 +434,98 @@ test('the footprint envelope is a modelled square of the declared area', () => {
   assert.equal(fp.collection.features[0].properties.data_class, 'modelled');
   assert.match(String(fp.collection.features[0].properties.note), /Not a surveyed boundary/);
   assert.equal(footprintEnvelope({ lat: SITE.lat, lon: SITE.lon, footprintHa: null }).collection.features.length, 0);
+});
+
+/**
+ * The backend declares eight environmental effects it does NOT model, each with a reason, and
+ * publishes the list both top-level on /datasets and nested under `integrity` on /landscape.
+ * The frontend read neither, so the app could present an analysis with no groundwater,
+ * flood-risk, noise or air-quality component and never say those effects were out of scope -
+ * an absence a reader could mistake for a finding of no impact. These tests pin the
+ * normalisation: both shapes parse, and nothing is ever invented.
+ *
+ * The list below is a synthetic stand-in shaped like the real registry, per the provenance note
+ * at the top of this file - it is not a statement about what the backend currently declares.
+ */
+const NOT_MODELLED_DATASETS_SHAPE = {
+  schema_version: '3a.1',
+  not_modelled_effects: [
+    {
+      id: 'groundwater_drawdown',
+      effect: 'Groundwater drawdown / aquifer response',
+      reason: 'Requires hydrogeological survey data and a calibrated groundwater model.',
+      status: 'NOT MODELLED',
+    },
+    {
+      id: 'flood_risk_change',
+      effect: 'Change in flood risk / surface runoff',
+      reason: 'Needs a rainfall-runoff model plus pre- and post-development surface data.',
+      status: 'NOT MODELLED',
+    },
+  ],
+};
+
+const NOT_MODELLED_LANDSCAPE_SHAPE = {
+  schema_version: '3a.1',
+  integrity: { not_modelled_effects: NOT_MODELLED_DATASETS_SHAPE.not_modelled_effects },
+};
+
+test('notModelledEffects parses both published shapes identically', () => {
+  const fromDatasets = notModelledEffects(NOT_MODELLED_DATASETS_SHAPE);
+  const fromLandscape = notModelledEffects(NOT_MODELLED_LANDSCAPE_SHAPE);
+
+  assert.equal(fromDatasets.length, 2);
+  assert.deepEqual(fromLandscape, fromDatasets);
+
+  assert.deepEqual(fromDatasets[0], {
+    id: 'groundwater_drawdown',
+    effect: 'Groundwater drawdown / aquifer response',
+    reason: 'Requires hydrogeological survey data and a calibrated groundwater model.',
+    status: 'NOT MODELLED',
+  });
+});
+
+test('notModelledEffects invents nothing for missing or malformed payloads', () => {
+  for (const payload of [
+    null,
+    undefined,
+    {},
+    { not_modelled_effects: null },
+    { not_modelled_effects: {} },
+    { not_modelled_effects: 'groundwater' },
+    { not_modelled_effects: '[]' },
+    { integrity: {} },
+    { integrity: { not_modelled_effects: 7 } },
+  ]) {
+    assert.deepEqual(notModelledEffects(payload), [], JSON.stringify(payload));
+  }
+});
+
+test('notModelledEffects drops entries that cannot name the effect', () => {
+  const rows = notModelledEffects({
+    not_modelled_effects: [
+      { id: 'a', effect: 'Noise propagation', reason: 'r', status: 'NOT MODELLED' },
+      { id: 'b', effect: '   ', reason: 'r', status: 'NOT MODELLED' },
+      { id: 'c', effect: 42, reason: 'r', status: 'NOT MODELLED' },
+      { id: 'd', reason: 'r', status: 'NOT MODELLED' },
+      null,
+      'noise',
+      7,
+    ],
+  });
+
+  assert.equal(rows.length, 1, 'only the row that names an effect survives');
+  assert.equal(rows[0].id, 'a');
+});
+
+test('notModelledEffects never supplies a reason or status the backend did not give', () => {
+  const rows = notModelledEffects({
+    not_modelled_effects: [{ effect: 'Heat island magnitude' }],
+  });
+
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].reason, '', 'a missing reason stays empty - it is not filled in');
+  assert.equal(rows[0].effect, 'Heat island magnitude');
+  assert.equal(rows[0].status, 'NOT MODELLED', 'status is a label, not a measurement');
+  assert.equal(rows[0].id, 'effect-0', 'a missing id falls back to a stable index key');
 });

@@ -29,4 +29,6 @@ export const api={
  legislationOne:(id:string)=>req<any>(`/legal/legislation/${id}`),
  searchLegal:(q:string)=>req<any[]>('/legal/search',{method:'POST',body:JSON.stringify({query:q})}),
  sources:()=>req<any[]>('/data-sources'),
+ /** Stage 3A registry: data-class definitions, integrity rules, NOT MODELLED effects. */
+ datasets:()=>req<any>('/datasets'),
 };
