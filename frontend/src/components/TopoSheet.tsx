@@ -393,6 +393,11 @@ export default function TopoSheet({
         </div>
         <div>
           <div className="mb-1 font-semibold uppercase text-stone-800">Layers</div>
+          {summary.partialCoverageWarning ? (
+            <p className="mb-1.5 border-l-2 border-amber-600 bg-amber-50 px-2 py-1 text-amber-900">
+              {summary.partialCoverageWarning}
+            </p>
+          ) : null}
           <ul className="space-y-0.5">
             {present.map((l) => (
               <li key={l.id} className="text-emerald-900">
