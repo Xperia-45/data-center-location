@@ -773,3 +773,34 @@ export function baseGeographyFingerprint(params: { cartography: CartographyResul
   parts.push(`contours:${params.contours.lines.map((l) => l.level).join(',')}`);
   return parts.join('|');
 }
+/** One effect the backend explicitly refuses to model, with the reason it gives. */
+export interface NotModelledEffect {
+  id: string;
+  effect: string;
+  reason: string;
+  status: string;
+}
+
+/**
+ * Normalise the backend's NOT MODELLED effects list into renderable rows.
+ *
+ * The backend publishes the same list in two shapes - top-level on `/datasets`, nested under
+ * `integrity` on `/landscape` - so both are accepted and the disclosure cannot be lost by
+ * reading the wrong endpoint. Anything unparseable yields an empty list rather than an invented
+ * one: this never adds an effect the backend did not declare, and never supplies a reason the
+ * backend did not give. An entry that cannot name its effect is dropped, because a row that
+ * cannot name the effect discloses nothing.
+ */
+export function notModelledEffects(payload: any): NotModelledEffect[] {
+  const raw = payload?.not_modelled_effects ?? payload?.integrity?.not_modelled_effects;
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .filter((e) => e && typeof e === 'object' && typeof e.effect === 'string' && e.effect.trim() !== '')
+    .map((e, i) => ({
+      id: typeof e.id === 'string' && e.id.trim() !== '' ? e.id.trim() : `effect-${i}`,
+      effect: e.effect.trim(),
+      reason: typeof e.reason === 'string' ? e.reason.trim() : '',
+      status: typeof e.status === 'string' && e.status.trim() !== '' ? e.status.trim() : 'NOT MODELLED',
+    }));
+}
+
