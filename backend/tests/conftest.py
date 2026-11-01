@@ -22,6 +22,22 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 from app.db import conn  # noqa: E402
 from app.services import elevation as elev_service  # noqa: E402
 from app.services import landscape as landscape_service  # noqa: E402
+from app.services import osm as osm_service  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _no_overpass_pacing(monkeypatch):
+    """
+    Neutralise production request pacing so the suite does not sleep.
+
+    The real defaults (a per-request stagger plus bounded exponential backoff) exist to keep a
+    deployed service inside Overpass's fair-use limits. Paying them in every test added ~2
+    minutes of pure sleeping to the suite and asserts nothing. Tests that exercise pacing or
+    backoff behaviour set these values explicitly.
+    """
+    monkeypatch.setattr(osm_service, "OVERPASS_REQUEST_DELAY_SEC", 0.0, raising=False)
+    monkeypatch.setattr(osm_service, "OVERPASS_BACKOFF_BASE_SEC", 0.0, raising=False)
+    yield
 
 
 @pytest.fixture(autouse=True)

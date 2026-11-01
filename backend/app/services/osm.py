@@ -19,7 +19,9 @@ import asyncio
 import datetime
 import math
 import os
+import random
 import re
+import weakref
 from typing import Any
 
 import httpx
@@ -45,6 +47,21 @@ OVERPASS_TIMEOUT_SEC = float(os.getenv("OVERPASS_TIMEOUT_SEC", "15"))
 # Attempts per endpoint. Failover across mirrors IS the retry strategy, so the default is one
 # attempt each; the total attempt budget is len(endpoints) * this value.
 OVERPASS_MIRROR_ATTEMPTS = max(1, int(os.getenv("OVERPASS_MIRROR_ATTEMPTS", "1")))
+
+# Overpass public instances ask for one or two concurrent queries per client. Eight layers
+# fanning out at once - each of which may then fail over to two more mirrors - puts a burst of
+# up to 24 requests on instances that are already the shared bottleneck, and the observed
+# production symptom is that only a fraction of the layers come back. These knobs bound that
+# burst. Suspected cause, not yet confirmed against a live response.
+OVERPASS_MAX_CONCURRENCY = max(1, int(os.getenv("OVERPASS_MAX_CONCURRENCY", "2")))
+# Small stagger applied while holding a concurrency slot, so the permitted requests do not all
+# land on the instance in the same instant.
+OVERPASS_REQUEST_DELAY_SEC = max(0.0, float(os.getenv("OVERPASS_REQUEST_DELAY_SEC", "0.15")))
+# Bounded exponential backoff between retryable attempts.
+OVERPASS_BACKOFF_BASE_SEC = max(0.0, float(os.getenv("OVERPASS_BACKOFF_BASE_SEC", "0.5")))
+OVERPASS_BACKOFF_MAX_SEC = max(
+    OVERPASS_BACKOFF_BASE_SEC, float(os.getenv("OVERPASS_BACKOFF_MAX_SEC", "4.0"))
+)
 
 # Client-side conditions that another instance may well survive.
 # Conditions that are about OUR request, not the instance: every mirror runs the same Overpass
@@ -74,6 +91,38 @@ def overpass_endpoints() -> list[str]:
         if url and url not in ordered:
             ordered.append(url)
     return ordered or [DEFAULT_OVERPASS_MIRRORS[0]]
+
+
+# One concurrency gate per event loop: an asyncio.Semaphore binds to the loop that first uses
+# it, and pytest drives a fresh loop per test, so a single module-level instance would raise
+# "bound to a different event loop". Rebuilt when the configured limit changes so tests and
+# reconfiguration both take effect.
+_overpass_semaphores: "weakref.WeakKeyDictionary[Any, tuple[int, asyncio.Semaphore]]" = (
+    weakref.WeakKeyDictionary()
+)
+
+
+def overpass_semaphore() -> asyncio.Semaphore:
+    """Shared gate limiting how many Overpass requests are in flight at once."""
+    loop = asyncio.get_running_loop()
+    limit = OVERPASS_MAX_CONCURRENCY
+    cached = _overpass_semaphores.get(loop)
+    if cached is None or cached[0] != limit:
+        cached = (limit, asyncio.Semaphore(limit))
+        _overpass_semaphores[loop] = cached
+    return cached[1]
+
+
+def backoff_delay(retry_index: int) -> float:
+    """
+    Bounded exponential backoff with jitter, in seconds. `retry_index` is 0-based.
+
+    Jitter matters here specifically: the layers fail against the same mirror at almost the same
+    instant, and identical delays would send all of them at the next mirror together, reproducing
+    exactly the burst this is meant to prevent.
+    """
+    capped = min(OVERPASS_BACKOFF_BASE_SEC * (2 ** max(0, retry_index)), OVERPASS_BACKOFF_MAX_SEC)
+    return capped * (0.5 + random.random() * 0.5)
 OVERPASS_QUERY_TIMEOUT_SEC = int(os.getenv("OVERPASS_QUERY_TIMEOUT", "12"))
 MAX_ELEMENTS_PER_LAYER = int(os.getenv("OVERPASS_MAX_ELEMENTS", "250"))
 MAX_GEOMETRY_POINTS = int(os.getenv("OVERPASS_MAX_GEOMETRY_POINTS", "200"))
@@ -385,14 +434,22 @@ async def fetch_layer(
     last_failure: list[tuple[str, str]] = [("network_error", "Overpass unreachable")]
 
     async def _attempt(cl: httpx.AsyncClient, url: str):
-        """One request to one endpoint: (succeeded, body, reason, detail, try_next_endpoint)."""
+        """
+        One request to one endpoint: (succeeded, body, reason, detail, try_next_endpoint).
+
+        The concurrency slot is held for the network call itself - and only for it - so every
+        mirror failover attempt is counted, while response parsing never occupies a slot.
+        """
         host = url.split("//")[-1].split("/")[0]
-        try:
-            resp = await cl.post(url, data={"data": query})
-        except httpx.TimeoutException:
-            return False, None, "timeout", f"{host} timed out after {OVERPASS_TIMEOUT_SEC}s", True
-        except httpx.HTTPError as exc:
-            return False, None, "network_error", f"{host} transport error: {exc}", True
+        async with overpass_semaphore():
+            if OVERPASS_REQUEST_DELAY_SEC:
+                await asyncio.sleep(OVERPASS_REQUEST_DELAY_SEC)
+            try:
+                resp = await cl.post(url, data={"data": query})
+            except httpx.TimeoutException:
+                return False, None, "timeout", f"{host} timed out after {OVERPASS_TIMEOUT_SEC}s", True
+            except httpx.HTTPError as exc:
+                return False, None, "network_error", f"{host} transport error: {exc}", True
         if resp.status_code == 429:
             return False, None, "rate_limited", f"{host} returned HTTP 429 (rate limited)", True
         if resp.status_code == 504:
@@ -411,6 +468,7 @@ async def fetch_layer(
         return True, payload, "", "", False
 
     async def _run(cl: httpx.AsyncClient):
+        retry_index = 0
         for url in endpoints:
             for _ in range(OVERPASS_MIRROR_ATTEMPTS):
                 ok, payload, reason, detail, try_next = await _attempt(cl, url)
@@ -419,7 +477,13 @@ async def fetch_layer(
                     return payload, url
                 last_failure[0] = (reason, detail)
                 if not try_next:
+                    # The instance rejected OUR request; waiting cannot change that answer, and
+                    # sleeping here would only delay an unavoidable failure.
                     return None, None
+                retry_index += 1
+                delay = backoff_delay(retry_index - 1)
+                if delay:
+                    await asyncio.sleep(delay)
         return None, None
 
     try:
