@@ -725,6 +725,12 @@ export interface SheetSummary {
   sampleSpacingKm: number;
   mappedFeatures: number;
   layerStatuses: LayerAvailability[];
+  /**
+   * The backend's aggregate warning when only some OSM layers were retrieved, verbatim. It states
+   * that absence of a feature in the missing layers says nothing about the ground - which the
+   * per-layer list alone does not convey, so it must be shown rather than summarised away.
+   */
+  partialCoverageWarning: string | null;
   osmAttribution: string | null;
   landCoverEpoch: string | null;
 }
@@ -755,6 +761,11 @@ export function summarizeSheet(params: { baseLayer: any; cartography: Cartograph
     sampleSpacingKm: contours.sample_spacing_km,
     mappedFeatures,
     layerStatuses: layerAvailability(baseLayer),
+    // Passed through untouched: rewording it would weaken a deliberate integrity statement.
+    partialCoverageWarning:
+      typeof osm.partial_coverage_warning === 'string' && osm.partial_coverage_warning.trim()
+        ? osm.partial_coverage_warning
+        : null,
     osmAttribution: osm.attribution ?? null,
     landCoverEpoch: landCover.dataset?.epoch ?? landCover.dataset?.name ?? null,
   };

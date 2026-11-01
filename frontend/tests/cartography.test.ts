@@ -361,6 +361,49 @@ test('the sheet says terrain is unavailable when the DEM is missing, without dro
   assert.equal(summary.contourCount, 0);
   assert.equal(summary.surfaceModel, null);
   assert.equal(summary.mappedFeatures, 1, 'mapped geography still renders');
+  });
+
+test('a partial OSM result surfaces the backend coverage warning verbatim', () => {
+    // The real production shape for a site where only one of eight layers came back.
+    const warning =
+      'PARTIAL COVERAGE: only 1/8 OSM layers were retrieved. This is NOT complete geography ' +
+      'for the site - absence of a feature in the missing layers says nothing about the ground.';
+    const baseLayer = {
+      terrain: { status: 'unavailable', reason: 'rate_limited' },
+      osm: {
+        status: 'partial',
+        partial_coverage_warning: warning,
+        attribution: '\u00a9 OpenStreetMap contributors (ODbL)',
+      },
+    };
+    const contours = contoursFromGrid({ values_m: null, lat: SITE.lat, lon: SITE.lon });
+    const carto = buildCartography({ features: [osmFeature()], radiusKm: 5 });
+    const summary = summarizeSheet({ baseLayer, cartography: carto, contours });
+
+    // Verbatim: rewording would weaken a deliberate integrity statement.
+    assert.equal(summary.partialCoverageWarning, warning);
+    assert.match(summary.partialCoverageWarning!, /says nothing about the ground/);
+    // The warning is additive - it must not suppress the geography that did arrive.
+    assert.equal(summary.mappedFeatures, 1);
+});
+
+test('no coverage warning is invented when the backend sent none', () => {
+    const contours = contoursFromGrid({ values_m: null, lat: SITE.lat, lon: SITE.lon });
+    const carto = buildCartography({ features: [osmFeature()], radiusKm: 5 });
+    for (const osm of [
+      { status: 'ok' },                                     // full coverage: backend sends none
+      { status: 'partial', partial_coverage_warning: null },
+      { status: 'partial', partial_coverage_warning: '' },
+      { status: 'partial', partial_coverage_warning: '   ' },
+      { status: 'partial', partial_coverage_warning: 42 },  // wrong type must not render
+    ]) {
+      const summary = summarizeSheet({
+        baseLayer: { terrain: { status: 'unavailable' }, osm },
+        cartography: carto,
+        contours,
+      });
+      assert.equal(summary.partialCoverageWarning, null, `invented a warning for ${JSON.stringify(osm)}`);
+    }
 });
 
 // ------------------------------------------------------------- temporal invariance
